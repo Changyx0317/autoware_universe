@@ -1,0 +1,17 @@
+/**:
+  ros__parameters:
+    input_control_cmd_topic: /control/command/control_cmd
+    input_gear_cmd_topic: /control/command/gear_cmd
+    output_twist_stamped_topic: /control/command/diff_drive_twist_cmd
+    output_frame_id: base_link
+    output_twist_topic: /control/command/diff_drive_twist
+    output_left_wheel_speed_topic: /control/command/left_wheel_speed_radps
+    output_right_wheel_speed_topic: /control/command/right_wheel_speed_radps
+
+    wheel_radius_m: 0.383
+    wheel_tread_m: 1.64
+    max_angular_velocity_rps: 1.2
+
+    use_gear_sign: false
+    publish_unstamped_twist: true
+    publish_wheel_speeds: true

@@ -25,6 +25,7 @@
 
   <!-- package param path -->
   <arg name="trajectory_follower_node_param_path"/>
+  <arg name="dwa_trajectory_follower_param_path"/>
   <arg name="lat_controller_param_path"/>
   <arg name="lon_controller_param_path"/>
   <arg name="vehicle_cmd_gate_param_path"/>
@@ -156,6 +157,14 @@
       <!-- smart_mpc, under development -->
       <group if="$(eval &quot;'$(var trajectory_follower_mode)' == 'smart_mpc_trajectory_follower'&quot;)">
         <node pkg="autoware_smart_mpc_trajectory_follower" exec="pympc_trajectory_follower.py" name="controller_node_exe"/>
+      </group>
+
+      <!-- dwa_trajectory_follower -->
+      <group if="$(eval &quot;'$(var trajectory_follower_mode)' == 'dwa_trajectory_follower'&quot;)">
+        <node pkg="autoware_dwa_trajectory_follower" exec="dwa_trajectory_follower_node" name="controller_node_exe" namespace="trajectory_follower" output="screen">
+          <param from="$(var dwa_trajectory_follower_param_path)"/>
+          <param from="$(var vehicle_param_file)"/>
+        </node>
       </group>
 
       <!-- external cmd selector -->

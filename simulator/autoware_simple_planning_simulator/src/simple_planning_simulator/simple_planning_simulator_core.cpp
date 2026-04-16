@@ -241,6 +241,7 @@ void SimplePlanningSimulator::initialize_vehicle_model(const std::string & vehic
   const double steer_time_constant = declare_parameter("steer_time_constant", 0.27);
   const double steer_dead_band = declare_parameter("steer_dead_band", 0.0);
   const double steer_bias = declare_parameter("steer_bias", 0.0);
+  const double diff_max_yaw_rate_rps = declare_parameter("diff_max_yaw_rate_rps", 1.2);
 
   const double debug_acc_scaling_factor = declare_parameter("debug_acc_scaling_factor", 1.0);
   const double debug_steer_scaling_factor = declare_parameter("debug_steer_scaling_factor", 1.0);
@@ -254,7 +255,10 @@ void SimplePlanningSimulator::initialize_vehicle_model(const std::string & vehic
   std::vector<std::string> model_class_names = declare_parameter<std::vector<std::string>>(
     "model_class_names", std::vector<std::string>({""}));
 
-  if (vehicle_model_type_str == "IDEAL_STEER_VEL") {
+  if (vehicle_model_type_str == "DIFF_DRIVE_VEL") {
+    vehicle_model_type_ = VehicleModelType::DIFF_DRIVE_VEL;
+    vehicle_model_ptr_ = std::make_shared<SimModelDiffDriveVel>(diff_max_yaw_rate_rps);
+  } else if (vehicle_model_type_str == "IDEAL_STEER_VEL") {
     vehicle_model_type_ = VehicleModelType::IDEAL_STEER_VEL;
     vehicle_model_ptr_ = std::make_shared<SimModelIdealSteerVel>(wheelbase);
   } else if (vehicle_model_type_str == "IDEAL_STEER_ACC") {
@@ -628,7 +632,8 @@ void SimplePlanningSimulator::set_input(const Control & cmd, const double acc_by
   if (
     vehicle_model_type_ == VehicleModelType::IDEAL_STEER_VEL ||
     vehicle_model_type_ == VehicleModelType::DELAY_STEER_VEL ||
-    vehicle_model_type_ == VehicleModelType::LEARNED_STEER_VEL) {
+    vehicle_model_type_ == VehicleModelType::LEARNED_STEER_VEL ||
+    vehicle_model_type_ == VehicleModelType::DIFF_DRIVE_VEL) {
     input << vel, steer;
   } else if (  // NOLINT
     vehicle_model_type_ == VehicleModelType::IDEAL_STEER_ACC ||
@@ -727,7 +732,9 @@ void SimplePlanningSimulator::set_initial_state(const Pose & pose, const Twist &
 
   Eigen::VectorXd state(vehicle_model_ptr_->getDimX());
 
-  if (vehicle_model_type_ == VehicleModelType::IDEAL_STEER_VEL) {
+  if (
+    vehicle_model_type_ == VehicleModelType::IDEAL_STEER_VEL ||
+    vehicle_model_type_ == VehicleModelType::DIFF_DRIVE_VEL) {
     state << x, y, yaw;
   } else if (  // NOLINT
     vehicle_model_type_ == VehicleModelType::IDEAL_STEER_ACC ||

@@ -3,6 +3,10 @@
     ld_velocity_ratio: 2.4
     ld_lateral_error_ratio: 3.6
     ld_curvature_ratio: 120.0
+    
+    max_angular_velocity_rps: 1.0
+    min_velocity_for_angular_rate_mps: 0.05
+
     long_ld_lateral_error_threshold: 0.5
     min_lookahead_distance: 4.35
     max_lookahead_distance: 15.0

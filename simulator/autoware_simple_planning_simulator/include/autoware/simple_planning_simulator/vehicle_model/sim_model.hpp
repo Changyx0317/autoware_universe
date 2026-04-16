@@ -21,6 +21,7 @@
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_delay_steer_acc_geared_wo_fall_guard.hpp"
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_delay_steer_map_acc_geared.hpp"
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_delay_steer_vel.hpp"
+#include "autoware/simple_planning_simulator/vehicle_model/sim_model_diff_drive_vel.hpp"
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_ideal_steer_acc.hpp"
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_ideal_steer_acc_geared.hpp"
 #include "autoware/simple_planning_simulator/vehicle_model/sim_model_ideal_steer_vel.hpp"

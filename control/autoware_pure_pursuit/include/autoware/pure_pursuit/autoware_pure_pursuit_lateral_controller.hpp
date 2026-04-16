@@ -34,8 +34,6 @@
 #include "autoware/pure_pursuit/autoware_pure_pursuit_viz.hpp"
 #include "autoware/trajectory_follower_base/lateral_controller_base.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "tf2_ros/buffer.h"
-#include "tf2_ros/transform_listener.h"
 
 #include <autoware/motion_utils/resample/resample.hpp>
 #include <autoware/motion_utils/trajectory/conversion.hpp>
@@ -74,6 +72,8 @@ struct Param
   // Global Parameters
   double wheel_base;
   double max_steering_angle;  // [rad]
+  double max_angular_velocity;  // [rad/s], diff-drive omega limit
+  double min_velocity_for_angular_rate;  // [m/s], avoid unstable omega at near-zero speed
 
   // Algorithm Parameters
   double ld_velocity_ratio;
@@ -126,9 +126,6 @@ private:
 
   void setResampledTrajectory();
 
-  // TF
-  tf2_ros::Buffer tf_buffer_;
-  tf2_ros::TransformListener tf_listener_;
   geometry_msgs::msg::Pose current_pose_;
 
   void publishDebugMarker() const;
@@ -139,7 +136,7 @@ private:
   bool isReady([[maybe_unused]] const InputData & input_data) override;
   LateralOutput run(const InputData & input_data) override;
 
-  Lateral generateCtrlCmdMsg(const double target_curvature);
+  Lateral generateCtrlCmdMsg(const double target_curvature, const double target_velocity);
 
   // Parameter
   Param param_{};

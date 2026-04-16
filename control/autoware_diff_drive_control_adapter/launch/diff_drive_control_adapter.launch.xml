@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+  <arg
+    name="param_file"
+    default="$(find-pkg-share autoware_diff_drive_control_adapter)/config/diff_drive_control_adapter.param.yaml"
+  />
+
+  <node
+    pkg="autoware_diff_drive_control_adapter"
+    exec="diff_drive_control_adapter_node"
+    name="diff_drive_control_adapter"
+    output="screen"
+  >
+    <param from="$(var param_file)"/>
+  </node>
+</launch>
+

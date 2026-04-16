@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<launch>
+  <arg
+    name="param_file"
+    default="$(find-pkg-share autoware_short_goal_pivot_coordinator)/config/short_goal_pivot_coordinator.param.yaml"
+  />
+
+  <node
+    pkg="autoware_short_goal_pivot_coordinator"
+    exec="short_goal_pivot_coordinator_node"
+    name="short_goal_pivot_coordinator"
+    output="screen"
+  >
+    <param from="$(var param_file)"/>
+  </node>
+</launch>

@@ -38,6 +38,7 @@
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -60,9 +61,7 @@ namespace autoware::pure_pursuit
 {
 PurePursuitLateralController::PurePursuitLateralController(rclcpp::Node & node)
 : clock_(node.get_clock()),
-  logger_(node.get_logger().get_child("lateral_controller")),
-  tf_buffer_(clock_),
-  tf_listener_(tf_buffer_)
+  logger_(node.get_logger().get_child("lateral_controller"))
 {
   pure_pursuit_ = std::make_unique<PurePursuit>();
 
@@ -70,6 +69,9 @@ PurePursuitLateralController::PurePursuitLateralController(rclcpp::Node & node)
   const auto vehicle_info = autoware::vehicle_info_utils::VehicleInfoUtils(node).getVehicleInfo();
   param_.wheel_base = vehicle_info.wheel_base_m;
   param_.max_steering_angle = vehicle_info.max_steer_angle_rad;
+  param_.max_angular_velocity = node.declare_parameter<double>("max_angular_velocity_rps");
+  param_.min_velocity_for_angular_rate =
+    node.declare_parameter<double>("min_velocity_for_angular_rate_mps");
 
   // Algorithm Parameters
   param_.ld_velocity_ratio = node.declare_parameter<double>("ld_velocity_ratio");
@@ -143,17 +145,19 @@ double PurePursuitLateralController::calcLookaheadDistance(
 TrajectoryPoint PurePursuitLateralController::calcNextPose(
   const double ds, TrajectoryPoint & point, Lateral cmd) const
 {
-  geometry_msgs::msg::Transform transform;
-  transform.translation = autoware_utils::create_translation(ds, 0.0, 0.0);
-  transform.rotation =
-    planning_utils::getQuaternionFromYaw(((tan(cmd.steering_tire_angle) * ds) / param_.wheel_base));
-  TrajectoryPoint output_p;
-
-  tf2::Transform tf_pose;
-  tf2::Transform tf_offset;
-  tf2::fromMsg(transform, tf_offset);
-  tf2::fromMsg(point.pose, tf_pose);
-  tf2::toMsg(tf_pose * tf_offset, output_p.pose);
+  TrajectoryPoint output_p = point;
+  const double yaw = tf2::getYaw(point.pose.orientation);
+  const double v = static_cast<double>(point.longitudinal_velocity_mps);
+  const double omega = static_cast<double>(cmd.steering_tire_angle);
+  const double v_abs = std::abs(v);
+  if (v_abs < param_.min_velocity_for_angular_rate) {
+    return output_p;
+  }
+  const double signed_ds = std::copysign(ds, v);
+  const double dt = std::abs(ds) / std::max(v_abs, 1e-3);
+  output_p.pose.position.x += signed_ds * std::cos(yaw);
+  output_p.pose.position.y += signed_ds * std::sin(yaw);
+  output_p.pose.orientation = planning_utils::getQuaternionFromYaw(yaw + omega * dt);
   return output_p;
 }
 
@@ -301,11 +305,11 @@ boost::optional<Trajectory> PurePursuitLateralController::generatePredictedTraje
       Lateral tmp_msg;
 
       if (pp_output) {
-        tmp_msg = generateCtrlCmdMsg(pp_output->curvature);
+        tmp_msg = generateCtrlCmdMsg(pp_output->curvature, pp_output->velocity);
         predicted_trajectory.points.at(i).longitudinal_velocity_mps = pp_output->velocity;
       } else {
         RCLCPP_WARN_THROTTLE(logger_, *clock_, 5000, "failed to solve pure_pursuit for prediction");
-        tmp_msg = generateCtrlCmdMsg(0.0);
+        tmp_msg = generateCtrlCmdMsg(0.0, predicted_trajectory.points.at(i).longitudinal_velocity_mps);
       }
       TrajectoryPoint p2;
       p2 = calcNextPose(param_.prediction_ds, predicted_trajectory.points.at(i), tmp_msg);
@@ -316,11 +320,11 @@ boost::optional<Trajectory> PurePursuitLateralController::generatePredictedTraje
       Lateral tmp_msg;
 
       if (pp_output) {
-        tmp_msg = generateCtrlCmdMsg(pp_output->curvature);
+        tmp_msg = generateCtrlCmdMsg(pp_output->curvature, pp_output->velocity);
         predicted_trajectory.points.at(i).longitudinal_velocity_mps = pp_output->velocity;
       } else {
         RCLCPP_WARN_THROTTLE(logger_, *clock_, 5000, "failed to solve pure_pursuit for prediction");
-        tmp_msg = generateCtrlCmdMsg(0.0);
+        tmp_msg = generateCtrlCmdMsg(0.0, predicted_trajectory.points.at(i).longitudinal_velocity_mps);
       }
       predicted_trajectory.points.push_back(
         calcNextPose(param_.prediction_ds, predicted_trajectory.points.at(i), tmp_msg));
@@ -370,8 +374,7 @@ LateralOutput PurePursuitLateralController::run(const InputData & input_data)
 
 bool PurePursuitLateralController::calcIsSteerConverged(const Lateral & cmd)
 {
-  return std::abs(cmd.steering_tire_angle - current_steering_.steering_tire_angle) <
-         static_cast<float>(param_.converged_steer_rad_);
+  return std::abs(cmd.steering_tire_angle) < static_cast<float>(param_.converged_steer_rad_);
 }
 
 Lateral PurePursuitLateralController::generateOutputControlCmd()
@@ -381,7 +384,7 @@ Lateral PurePursuitLateralController::generateOutputControlCmd()
   Lateral output_cmd;
 
   if (pp_output) {
-    output_cmd = generateCtrlCmdMsg(pp_output->curvature);
+    output_cmd = generateCtrlCmdMsg(pp_output->curvature, pp_output->velocity);
     prev_cmd_ = boost::optional<Lateral>(output_cmd);
     publishDebugMarker();
   } else {
@@ -390,20 +393,25 @@ Lateral PurePursuitLateralController::generateOutputControlCmd()
     if (prev_cmd_) {
       output_cmd = *prev_cmd_;
     } else {
-      output_cmd = generateCtrlCmdMsg(0.0);
+      output_cmd = generateCtrlCmdMsg(0.0, current_odometry_.twist.twist.linear.x);
     }
   }
   return output_cmd;
 }
 
-Lateral PurePursuitLateralController::generateCtrlCmdMsg(const double target_curvature)
+Lateral PurePursuitLateralController::generateCtrlCmdMsg(
+  const double target_curvature, const double target_velocity)
 {
-  const double tmp_steering =
-    planning_utils::convertCurvatureToSteeringAngle(param_.wheel_base, target_curvature);
+  const double v = target_velocity;
+  const double v_abs = std::abs(v);
+  const double omega_raw =
+    (v_abs < param_.min_velocity_for_angular_rate) ? 0.0 : (v * target_curvature);
+  const double omega =
+    std::clamp(omega_raw, -param_.max_angular_velocity, param_.max_angular_velocity);
   Lateral cmd;
   cmd.stamp = clock_->now();
-  cmd.steering_tire_angle = static_cast<float>(
-    std::min(std::max(tmp_steering, -param_.max_steering_angle), param_.max_steering_angle));
+  // Diff-drive semantic: write yaw-rate command into steering_tire_angle field.
+  cmd.steering_tire_angle = static_cast<float>(omega);
 
   // pub_ctrl_cmd_->publish(cmd);
   return cmd;

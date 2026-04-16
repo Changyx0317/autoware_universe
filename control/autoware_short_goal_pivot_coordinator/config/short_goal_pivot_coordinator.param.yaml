@@ -1,0 +1,18 @@
+/**:
+  ros__parameters:
+    input_control_cmd_topic: /control/trajectory_follower/control_cmd
+    output_control_cmd_topic: /control/trajectory_follower/control_cmd_pivot
+    trajectory_topic: /planning/scenario_planning/trajectory
+    kinematic_state_topic: /localization/kinematic_state
+
+    enable_short_goal_pivot: true
+    short_goal_pivot_trigger_distance_m: 2.0
+    pivot_enter_yaw_error_rad: 0.6
+    pivot_exit_yaw_error_rad: 0.15
+    pivot_kp: 1.0
+    pivot_max_w_radps: 0.4
+    pivot_timeout_s: 5.0
+
+    stop_speed_threshold_mps: 0.03
+    stop_yaw_rate_threshold_rps: 0.1
+    stop_settle_time_s: 0.3

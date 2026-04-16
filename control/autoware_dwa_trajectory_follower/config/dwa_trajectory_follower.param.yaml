@@ -1,0 +1,115 @@
+/**:
+  ros__parameters:
+    # 控制循环频率（Hz）
+    control_rate_hz: 50.0
+    # 判定“到达目标”的距离阈值（m）
+    goal_tolerance_m: 0.1
+    # 终点接管半径（m）：进入该范围后绕过DWA，执行刹停+原地对齐
+    terminal_capture_distance_m: 0.2
+    # 距离终点小于该阈值时禁用倒车切换（m），避免终点附近转圈
+    near_goal_disable_reverse_distance_m: 0.8
+
+    # 终点附近“零速转向”停车阈值（m/s），小于该速度目标时直接停车
+    near_goal_spin_stop_speed_threshold_mps: 0.05
+    # 终点朝向对齐启动线速度阈值（m/s），仅当车速低于该值才开始原地转向
+    yaw_align_start_speed_threshold_mps: 0.02
+    # 终点朝向对齐前的停稳确认时间（s），需连续满足低速条件这么久才进入对齐
+    yaw_align_settle_time_s: 0.30
+    # 是否启用“到点后原地转向对齐终点朝向”
+    use_goal_yaw_alignment: true
+    # 到点停车后，收到近距离新目标时是否先原地转向再起步
+    enable_short_goal_pivot_after_stop: true
+    # 触发“先原地转向再起步”的近距离阈值（m）
+    short_goal_pivot_trigger_distance_m: 5.0
+
+    # 终点朝向对齐容差（rad）
+    goal_yaw_tolerance_rad: 0.05
+    # 终点朝向对齐阶段的位置滞回窗口（m），避免位置轻微抖动导致反复进出对齐状态
+    goal_yaw_align_position_hysteresis_m: 0.3
+    # 终点朝向对齐比例系数（w = kp * yaw_err）
+    goal_yaw_align_kp: 1.0
+    # 终点朝向对齐最大角速度（rad/s）
+    goal_yaw_align_max_w_rps: 0.35
+    # 终点朝向对齐角速度最大变化率（rad/s^2），用于抑制指令阶跃
+    yaw_align_max_w_accel_rps2: 1.5
+    # 终点朝向对齐最小角速度（rad/s），避免低速区间抖动
+    yaw_align_min_w_rps: 0.05
+    # 当|yaw_err|接近pi时的方向锁定带宽（rad），避免+pi/-pi翻转
+    yaw_align_pi_band_rad: 0.15
+
+    # 纯差速语义：DWA最优角速度w将直接写入steering_tire_angle字段
+
+    # 最小速度绝对值（m/s）
+    min_speed_mps: 0.0
+    # 最大速度绝对值（m/s）
+    max_speed_mps: 1.2
+    # 最大加速度（m/s^2）
+    max_accel_mps2: 1.5
+    # 最大减速度（m/s^2，负值）
+    max_decel_mps2: -5.0
+
+    # 切入倒车阈值：目标点在车体x轴后方到该值以下时切倒车（m）
+    reverse_enter_x_threshold_m: -0.30
+    # 退出倒车阈值：目标点回到车体前方超过该值时切前进（m）
+    reverse_exit_x_threshold_m: 0.50
+
+    # DWA预测时域长度（s）
+    dwa_predict_time_s: 2.0
+    # DWA前向仿真步长（s）
+    dwa_dt_s: 0.1
+    # DWA线速度采样分辨率（m/s）
+    dwa_v_resolution_mps: 0.10
+    # DWA角速度采样分辨率（rad/s）
+    dwa_w_resolution_rps: 0.10
+    # 角速度上限（rad/s）
+    dwa_max_yaw_rate_rps: 1.0
+    # 角加速度上限（rad/s^2）
+    dwa_max_yaw_accel_rps2: 1.2
+    # DWA用于构建动态窗口的速度加速度上限（m/s^2）
+    dwa_max_accel_mps2: 1.0
+
+    # 目标距离代价权重
+    w_goal_dist: 1.0
+    # 目标朝向误差代价权重
+    w_goal_heading: 0.4
+    # 速度代价权重（鼓励接近巡航速度）
+    w_speed: 0.6
+    # 障碍物代价权重
+    w_obstacle: 1.4
+    # 推进代价权重（推进不足会被惩罚）
+    w_progress: 2.0
+    # 角速度惩罚权重（越大越偏好小转向）
+    w_omega: 0.4
+    # 最小推进比例阈值（相对v*预测时间）
+    min_progress_ratio: 0.15
+
+    # 数值稳定项，避免除零
+    norm_eps: 1.0e-6
+    # exp模式下障碍物代价衰减系数
+    obstacle_exp_k: 1.2
+
+    # 障碍物膨胀半径（m）
+    obstacle_inflation_radius_m: 0.6
+    # 机器人碰撞半径（m）
+    robot_collision_radius_m: 1.0
+    # 障碍物考虑范围（m），超出则忽略
+    obstacle_consider_range_m: 25.0
+    # 刹停距离裕量（m）
+    braking_distance_margin_m: 0.2
+    # 反应时间（s），参与刹停距离估计
+    braking_reaction_time_s: 0.20
+    # TTC代价考虑时域（s）
+    ttc_horizon_s: 3.0
+    # TTC代价增益
+    ttc_cost_gain: 1.0
+
+    # 巡航速度目标（m/s）
+    cruise_speed_mps: 1.0
+    # 距离目标多近开始降速（m）
+    near_goal_slowdown_distance_m: 3.0
+    # 最小推进搜索速度（m/s）
+    min_progress_speed_mps: 0.25
+    # 速度动态窗口前瞻时域（s），用于放大v采样窗口，缓解上层-下层滞后
+    velocity_window_time_s: 0.4
+    # 速度估计融合系数（0~1，越大越贴近实时测量）
+    velocity_estimator_alpha: 0.35

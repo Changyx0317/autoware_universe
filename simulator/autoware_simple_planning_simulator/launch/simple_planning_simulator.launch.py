@@ -44,8 +44,8 @@ def launch_setup(context, *args, **kwargs):
     # Base remappings
     remappings = [
         ("input/vector_map", "/map/vector_map"),
-        ("input/initialpose", "/initialpose3d"),
-        ("input/ackermann_control_command", "/control/command/control_cmd"),
+        ("input/initialpose", "/initialpose"),
+        ("input/ackermann_control_command", LaunchConfiguration("input_ackermann_control_command").perform(context)),
         ("input/actuation_command", "/control/command/actuation_cmd"),
         ("input/manual_ackermann_control_command", "/vehicle/command/manual_control_cmd"),
         ("input/gear_command", "/control/command/gear_cmd"),
@@ -163,6 +163,13 @@ def generate_launch_description():
             "/param/simple_planning_simulator_default.param.yaml",
         ],
         "path to config file for simulator_model",
+    )
+
+
+    add_launch_arg(
+        "input_ackermann_control_command",
+        "/control/command/control_cmd",
+        "input control command topic for simulator",
     )
 
     add_launch_arg(
