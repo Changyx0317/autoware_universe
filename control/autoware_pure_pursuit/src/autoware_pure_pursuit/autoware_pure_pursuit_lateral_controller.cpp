@@ -72,6 +72,39 @@ PurePursuitLateralController::PurePursuitLateralController(rclcpp::Node & node)
   param_.max_angular_velocity = node.declare_parameter<double>("max_angular_velocity_rps");
   param_.min_velocity_for_angular_rate =
     node.declare_parameter<double>("min_velocity_for_angular_rate_mps");
+  param_.enable_in_place_rotation_when_stopped =
+    node.declare_parameter<bool>("enable_in_place_rotation_when_stopped", false);
+  param_.in_place_rotation_stop_velocity =
+    node.declare_parameter<double>("in_place_rotation_stop_velocity_mps", 0.01);
+  param_.in_place_rotation_angular_velocity =
+    node.declare_parameter<double>("in_place_rotation_angular_velocity_rps", 0.3);
+  param_.enable_heading_alignment_gate =
+    node.declare_parameter<bool>("enable_heading_alignment_gate", false);
+  param_.heading_alignment_threshold_rad =
+    node.declare_parameter<double>("heading_alignment_threshold_rad", 0.2);
+  param_.heading_alignment_exit_threshold_rad =
+    node.declare_parameter<double>(
+      "heading_alignment_exit_threshold_rad", param_.heading_alignment_threshold_rad);
+  param_.heading_alignment_check_max_speed =
+    node.declare_parameter<double>("heading_alignment_check_max_speed_mps", 0.2);
+  param_.heading_alignment_min_target_distance =
+    node.declare_parameter<double>("heading_alignment_min_target_distance_m", 0.3);
+  param_.enable_goal_yaw_alignment_after_stop =
+    node.declare_parameter<bool>("enable_goal_yaw_alignment_after_stop", true);
+  param_.goal_yaw_alignment_position_tolerance =
+    node.declare_parameter<double>("goal_yaw_alignment_position_tolerance_m", 0.3);
+  param_.goal_yaw_alignment_position_hysteresis =
+    node.declare_parameter<double>("goal_yaw_alignment_position_hysteresis_m", 0.2);
+  param_.goal_yaw_alignment_yaw_tolerance =
+    node.declare_parameter<double>("goal_yaw_alignment_yaw_tolerance_rad", 0.08);
+  param_.goal_yaw_alignment_exit_tolerance =
+    node.declare_parameter<double>(
+      "goal_yaw_alignment_exit_tolerance_rad", param_.goal_yaw_alignment_yaw_tolerance);
+  param_.goal_yaw_alignment_kp = node.declare_parameter<double>("goal_yaw_alignment_kp", 1.5);
+  param_.goal_yaw_alignment_min_w =
+    node.declare_parameter<double>("goal_yaw_alignment_min_w_rps", 0.03);
+  param_.goal_yaw_alignment_max_w_accel =
+    node.declare_parameter<double>("goal_yaw_alignment_max_w_accel_rps2", 1.0);
 
   // Algorithm Parameters
   param_.ld_velocity_ratio = node.declare_parameter<double>("ld_velocity_ratio");
@@ -374,7 +407,49 @@ LateralOutput PurePursuitLateralController::run(const InputData & input_data)
 
 bool PurePursuitLateralController::calcIsSteerConverged(const Lateral & cmd)
 {
-  return std::abs(cmd.steering_tire_angle) < static_cast<float>(param_.converged_steer_rad_);
+  const bool is_steer_converged =
+    std::abs(cmd.steering_tire_angle) < static_cast<float>(param_.converged_steer_rad_);
+  if (!param_.enable_heading_alignment_gate && !param_.enable_goal_yaw_alignment_after_stop) {
+    return is_steer_converged;
+  }
+
+  const double ego_speed = std::abs(current_odometry_.twist.twist.linear.x);
+  if (ego_speed > std::max(0.0, param_.heading_alignment_check_max_speed)) {
+    return is_steer_converged;
+  }
+  const bool is_fully_stopped = ego_speed <= std::max(0.0, param_.in_place_rotation_stop_velocity);
+  const double current_yaw = tf2::getYaw(current_pose_.orientation);
+
+  if (
+    param_.enable_goal_yaw_alignment_after_stop && is_fully_stopped && debug_data_.has_goal_pose &&
+    debug_data_.goal_distance_m <= std::max(0.0, param_.goal_yaw_alignment_position_tolerance))
+  {
+    const double yaw_error = autoware_utils::normalize_radian(debug_data_.goal_yaw - current_yaw);
+    const bool is_goal_yaw_converged =
+      std::abs(yaw_error) <= std::max(0.0, param_.goal_yaw_alignment_exit_tolerance);
+    return is_steer_converged && is_goal_yaw_converged;
+  }
+
+  if (!param_.enable_heading_alignment_gate || !debug_data_.has_next_target) {
+    return is_steer_converged;
+  }
+
+  const double dx = debug_data_.next_target.x - current_pose_.position.x;
+  const double dy = debug_data_.next_target.y - current_pose_.position.y;
+  const double target_distance = std::hypot(dx, dy);
+  if (target_distance < std::max(0.0, param_.heading_alignment_min_target_distance)) {
+    return is_steer_converged;
+  }
+
+  double target_yaw = std::atan2(dy, dx);
+  if (debug_data_.is_reverse_target) {
+    target_yaw = autoware_utils::normalize_radian(target_yaw + M_PI);
+  }
+  const double yaw_error = autoware_utils::normalize_radian(target_yaw - current_yaw);
+  const bool is_heading_converged =
+    std::abs(yaw_error) <= std::max(0.0, param_.heading_alignment_exit_threshold_rad);
+
+  return is_steer_converged && is_heading_converged;
 }
 
 Lateral PurePursuitLateralController::generateOutputControlCmd()
@@ -388,6 +463,15 @@ Lateral PurePursuitLateralController::generateOutputControlCmd()
     prev_cmd_ = boost::optional<Lateral>(output_cmd);
     publishDebugMarker();
   } else {
+    debug_data_.has_next_target = false;
+    debug_data_.is_reverse_target = false;
+    debug_data_.has_goal_pose = false;
+    goal_yaw_alignment_active_ = false;
+    goal_yaw_alignment_goal_locked_ = false;
+    goal_yaw_alignment_direction_ = 0;
+    goal_yaw_alignment_done_hold_ = false;
+    goal_yaw_alignment_last_w_ = 0.0;
+    heading_alignment_active_ = false;
     RCLCPP_WARN_THROTTLE(
       logger_, *clock_, 5000, "failed to solve pure_pursuit for control command calculation");
     if (prev_cmd_) {
@@ -404,10 +488,129 @@ Lateral PurePursuitLateralController::generateCtrlCmdMsg(
 {
   const double v = target_velocity;
   const double v_abs = std::abs(v);
-  const double omega_raw =
-    (v_abs < param_.min_velocity_for_angular_rate) ? 0.0 : (v * target_curvature);
+  const double ego_speed = std::abs(current_odometry_.twist.twist.linear.x);
+  const bool is_fully_stopped = ego_speed <= std::max(0.0, param_.in_place_rotation_stop_velocity);
+  const double current_yaw = tf2::getYaw(current_pose_.orientation);
+
+  double omega_raw = 0.0;
+  bool use_in_place_alignment = false;
+
+  // 1) Final goal-yaw alignment has the highest priority.
+  const double goal_pos_enter = std::max(0.0, param_.goal_yaw_alignment_position_tolerance);
+  const double goal_pos_keep = goal_pos_enter +
+    std::max(0.0, param_.goal_yaw_alignment_position_hysteresis);
+  const bool in_goal_window_enter = debug_data_.goal_distance_m <= goal_pos_enter;
+  const bool in_goal_window_keep = debug_data_.goal_distance_m <= goal_pos_keep;
+  const bool should_keep_goal_phase =
+    goal_yaw_alignment_active_ || goal_yaw_alignment_done_hold_;
+
+  if (
+    param_.enable_in_place_rotation_when_stopped && param_.enable_goal_yaw_alignment_after_stop &&
+    is_fully_stopped && debug_data_.has_goal_pose &&
+    (in_goal_window_enter || (should_keep_goal_phase && in_goal_window_keep)))
+  {
+    if (!goal_yaw_alignment_goal_locked_) {
+      goal_yaw_alignment_goal_yaw_ = debug_data_.goal_yaw;
+      goal_yaw_alignment_goal_locked_ = true;
+      goal_yaw_alignment_direction_ = 0;
+    }
+    const double yaw_error =
+      autoware_utils::normalize_radian(goal_yaw_alignment_goal_yaw_ - current_yaw);
+    const double enter_thr = std::max(0.0, param_.goal_yaw_alignment_yaw_tolerance);
+    const double exit_thr =
+      std::max(0.0, std::min(param_.goal_yaw_alignment_exit_tolerance, enter_thr));
+
+    if (!goal_yaw_alignment_active_ && std::abs(yaw_error) > enter_thr) {
+      goal_yaw_alignment_active_ = true;
+      goal_yaw_alignment_done_hold_ = false;
+    } else if (goal_yaw_alignment_active_ && std::abs(yaw_error) <= exit_thr) {
+      goal_yaw_alignment_active_ = false;
+      goal_yaw_alignment_done_hold_ = true;
+      goal_yaw_alignment_direction_ = 0;
+      goal_yaw_alignment_last_w_ = 0.0;
+    }
+
+    if (goal_yaw_alignment_active_) {
+      use_in_place_alignment = true;
+      const double max_w = std::max(0.0, param_.in_place_rotation_angular_velocity);
+      const double min_w = std::clamp(param_.goal_yaw_alignment_min_w, 0.0, max_w);
+      const double slowdown_start = std::max(enter_thr * 4.0, 0.2);
+      const double align_scale = std::clamp(std::abs(yaw_error) / slowdown_start, 0.05, 1.0);
+      const double w_target = param_.goal_yaw_alignment_kp * std::abs(yaw_error) * align_scale;
+      const double w_mag = std::clamp(w_target, 0.0, max_w);
+      const double w_mag_with_floor =
+        (w_mag > 0.0 && std::abs(yaw_error) > exit_thr) ? std::max(w_mag, min_w) : 0.0;
+      if (goal_yaw_alignment_direction_ == 0) {
+        goal_yaw_alignment_direction_ = (yaw_error >= 0.0) ? 1 : -1;
+      }
+      const double desired_w = static_cast<double>(goal_yaw_alignment_direction_) * w_mag_with_floor;
+      const double dt = 0.03;  // controller runs around 30+ Hz in this setup
+      const double max_dw = std::max(0.0, param_.goal_yaw_alignment_max_w_accel) * dt;
+      if (max_dw > 0.0) {
+        omega_raw = std::clamp(
+          desired_w, goal_yaw_alignment_last_w_ - max_dw, goal_yaw_alignment_last_w_ + max_dw);
+      } else {
+        omega_raw = desired_w;
+      }
+    } else if (goal_yaw_alignment_done_hold_) {
+      // Keep stop near goal once final yaw is aligned to avoid sign flip jitter around zero error.
+      use_in_place_alignment = true;
+      omega_raw = 0.0;
+    }
+  } else {
+    goal_yaw_alignment_active_ = false;
+    goal_yaw_alignment_goal_locked_ = false;
+    goal_yaw_alignment_direction_ = 0;
+    goal_yaw_alignment_done_hold_ = false;
+    goal_yaw_alignment_last_w_ = 0.0;
+  }
+
+  // 2) Start heading-alignment gate (including reverse tail alignment).
+  if (
+    !use_in_place_alignment && param_.enable_in_place_rotation_when_stopped &&
+    param_.enable_heading_alignment_gate && is_fully_stopped && debug_data_.has_next_target)
+  {
+    const double dx = debug_data_.next_target.x - current_pose_.position.x;
+    const double dy = debug_data_.next_target.y - current_pose_.position.y;
+    const double target_distance = std::hypot(dx, dy);
+
+    if (target_distance >= std::max(0.0, param_.heading_alignment_min_target_distance)) {
+      double target_yaw = std::atan2(dy, dx);
+      if (debug_data_.is_reverse_target) {
+        target_yaw = autoware_utils::normalize_radian(target_yaw + M_PI);
+      }
+      const double yaw_error = autoware_utils::normalize_radian(target_yaw - current_yaw);
+      const double enter_thr = std::max(0.0, param_.heading_alignment_threshold_rad);
+      const double exit_thr = std::max(0.0, std::min(param_.heading_alignment_exit_threshold_rad, enter_thr));
+
+      if (!heading_alignment_active_ && std::abs(yaw_error) > enter_thr) {
+        heading_alignment_active_ = true;
+      } else if (heading_alignment_active_ && std::abs(yaw_error) <= exit_thr) {
+        heading_alignment_active_ = false;
+      }
+
+      if (heading_alignment_active_) {
+        use_in_place_alignment = true;
+        omega_raw = std::copysign(
+          std::max(0.0, param_.in_place_rotation_angular_velocity), yaw_error);
+      }
+    } else {
+      heading_alignment_active_ = false;
+    }
+  } else if (!is_fully_stopped) {
+    heading_alignment_active_ = false;
+  }
+
+  if (!use_in_place_alignment) {
+    omega_raw = (v_abs < param_.min_velocity_for_angular_rate) ? 0.0 : (v * target_curvature);
+  }
   const double omega =
     std::clamp(omega_raw, -param_.max_angular_velocity, param_.max_angular_velocity);
+  if (use_in_place_alignment && goal_yaw_alignment_active_) {
+    goal_yaw_alignment_last_w_ = omega;
+  } else if (!goal_yaw_alignment_active_) {
+    goal_yaw_alignment_last_w_ = 0.0;
+  }
   Lateral cmd;
   cmd.stamp = clock_->now();
   // Diff-drive semantic: write yaw-rate command into steering_tire_angle field.
@@ -485,6 +688,18 @@ boost::optional<PpOutput> PurePursuitLateralController::calcTargetCurvature(
   // Set debug data
   if (is_control_output) {
     debug_data_.next_target = pure_pursuit_->getLocationOfNextTarget();
+    debug_data_.has_next_target = true;
+    debug_data_.is_reverse_target = target_vel < 0.0;
+    if (!trajectory_resampled_->points.empty()) {
+      const auto & goal_pose = trajectory_resampled_->points.back().pose;
+      debug_data_.has_goal_pose = true;
+      debug_data_.goal_yaw = tf2::getYaw(goal_pose.orientation);
+      debug_data_.goal_distance_m = std::hypot(
+        goal_pose.position.x - pose.position.x, goal_pose.position.y - pose.position.y);
+    } else {
+      debug_data_.has_goal_pose = false;
+      debug_data_.goal_distance_m = 0.0;
+    }
   }
   PpOutput output{};
   output.curvature = kappa;

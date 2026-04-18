@@ -1,20 +1,35 @@
 /**:
   ros__parameters:
-    ld_velocity_ratio: 2.4
-    ld_lateral_error_ratio: 3.6
-    ld_curvature_ratio: 120.0
-    
-    max_angular_velocity_rps: 1.0
-    min_velocity_for_angular_rate_mps: 0.05
-
-    long_ld_lateral_error_threshold: 0.5
-    min_lookahead_distance: 4.35
-    max_lookahead_distance: 15.0
-    converged_steer_rad: 0.1
-    reverse_min_lookahead_distance: 7.0
-    prediction_ds: 0.3
-    prediction_distance_length: 21.0
-    resampling_ds: 0.1
-    curvature_calculation_distance: 4.0
-    enable_path_smoothing: false
-    path_filter_moving_ave_num: 25
+    ld_velocity_ratio: 2.4  # 前视距离中的速度项系数，速度越大前视距离越长
+    ld_lateral_error_ratio: 3.6  # 前视距离中的横向误差项系数，偏差越大前视距离越长
+    ld_curvature_ratio: 120.0  # 前视距离中的曲率项系数（负向作用），弯越急前视距离越短
+    max_angular_velocity_rps: 1.0  # 横向控制输出角速度上限（rad/s，差速语义）
+    min_velocity_for_angular_rate_mps: 0.05  # 低于该车速时按近静止处理，默认不输出角速度
+    enable_in_place_rotation_when_stopped: false  # 是否在完全停稳时允许原地定速转向
+    in_place_rotation_stop_velocity_mps: 0.01  # 判定“完全停稳”的速度阈值（m/s）
+    in_place_rotation_angular_velocity_rps: 0.3  # 原地转向时使用的固定角速度幅值（rad/s）
+    in_place_rotation_curvature_threshold: 0.0001  # 原地转向触发的最小曲率阈值，抑制噪声抖动
+    enable_heading_alignment_gate: false  # 是否启用“起步前朝向对齐”门控
+    heading_alignment_threshold_rad: 0.20  # 起步前允许的目标方位角误差阈值（rad）
+    heading_alignment_exit_threshold_rad: 0.12  # 起步朝向门控解除阈值（rad，建议小于进入阈值形成滞回）
+    heading_alignment_check_max_speed_mps: 0.20  # 仅在低于该速度时启用朝向门控（m/s）
+    heading_alignment_min_target_distance_m: 0.30  # 目标点过近时跳过朝向门控（m）
+    enable_goal_yaw_alignment_after_stop: true  # 到达终点位置并停稳后，是否启用终点朝向对齐
+    goal_yaw_alignment_position_tolerance_m: 0.30  # 进入终点朝向对齐的终点位置阈值（m）
+    goal_yaw_alignment_position_hysteresis_m: 0.20  # 终点对齐阶段的位置滞回窗口（m）
+    goal_yaw_alignment_yaw_tolerance_rad: 0.08  # 终点朝向对齐判据阈值（rad）
+    goal_yaw_alignment_exit_tolerance_rad: 0.05  # 终点朝向对齐解除阈值（rad，建议小于进入阈值形成滞回）
+    goal_yaw_alignment_kp: 1.5  # 终点对齐角速度比例系数
+    goal_yaw_alignment_min_w_rps: 0.03  # 终点对齐最小角速度（rad/s）
+    goal_yaw_alignment_max_w_accel_rps2: 1.0  # 终点对齐角速度变化率上限（rad/s^2）
+    long_ld_lateral_error_threshold: 0.5  # 触发“增大前视距离”的横向误差阈值（m）
+    min_lookahead_distance: 4.35  # 最小前视距离（m）
+    max_lookahead_distance: 15.0  # 最大前视距离（m）
+    converged_steer_rad: 0.1  # 转向收敛判据阈值（rad）
+    reverse_min_lookahead_distance: 7.0  # 倒车时最小前视距离（m）
+    prediction_ds: 0.3  # 预测轨迹离散步长（m）
+    prediction_distance_length: 21.0  # 预测轨迹总长度（m）
+    resampling_ds: 0.1  # 输入轨迹重采样间隔（m）
+    curvature_calculation_distance: 4.0  # 计算当前曲率时前后取点的目标距离（m）
+    enable_path_smoothing: false  # 是否对输入轨迹做平滑
+    path_filter_moving_ave_num: 25  # 轨迹平滑移动平均窗口半宽（点数）

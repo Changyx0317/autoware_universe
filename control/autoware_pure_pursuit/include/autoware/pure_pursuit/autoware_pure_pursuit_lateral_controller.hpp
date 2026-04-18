@@ -74,6 +74,22 @@ struct Param
   double max_steering_angle;  // [rad]
   double max_angular_velocity;  // [rad/s], diff-drive omega limit
   double min_velocity_for_angular_rate;  // [m/s], avoid unstable omega at near-zero speed
+  bool enable_in_place_rotation_when_stopped;  // allow in-place yaw-rate command at full stop
+  double in_place_rotation_stop_velocity;  // [m/s], threshold to consider vehicle fully stopped
+  double in_place_rotation_angular_velocity;  // [rad/s], fixed in-place yaw-rate magnitude
+  bool enable_heading_alignment_gate;  // gate start until heading roughly aligns to target
+  double heading_alignment_threshold_rad;  // [rad], enter threshold for heading alignment
+  double heading_alignment_exit_threshold_rad;  // [rad], exit threshold for heading alignment
+  double heading_alignment_check_max_speed;  // [m/s], apply heading gate only below this speed
+  double heading_alignment_min_target_distance;  // [m], skip heading gate if target is too close
+  bool enable_goal_yaw_alignment_after_stop;  // align final goal yaw after reaching goal position
+  double goal_yaw_alignment_position_tolerance;  // [m], goal position reach threshold
+  double goal_yaw_alignment_position_hysteresis;  // [m], keep-goal-window hysteresis
+  double goal_yaw_alignment_yaw_tolerance;  // [rad], enter threshold for goal yaw alignment
+  double goal_yaw_alignment_exit_tolerance;  // [rad], exit threshold for goal yaw alignment
+  double goal_yaw_alignment_kp;  // [rad/s]/[rad], proportional gain for goal yaw alignment
+  double goal_yaw_alignment_min_w;  // [rad/s], minimum in-place yaw-rate while aligning
+  double goal_yaw_alignment_max_w_accel;  // [rad/s^2], yaw-rate slew-rate limit
 
   // Algorithm Parameters
   double ld_velocity_ratio;
@@ -95,6 +111,11 @@ struct Param
 struct DebugData
 {
   geometry_msgs::msg::Point next_target;
+  bool has_next_target{false};
+  bool is_reverse_target{false};
+  bool has_goal_pose{false};
+  double goal_yaw{0.0};
+  double goal_distance_m{0.0};
 };
 
 class PurePursuitLateralController : public LateralControllerBase
@@ -170,6 +191,13 @@ private:
 
   // Debug
   mutable DebugData debug_data_;
+  bool heading_alignment_active_{false};
+  bool goal_yaw_alignment_active_{false};
+  bool goal_yaw_alignment_goal_locked_{false};
+  int goal_yaw_alignment_direction_{0};  // +1/-1 while aligning, 0 not set
+  bool goal_yaw_alignment_done_hold_{false};
+  double goal_yaw_alignment_goal_yaw_{0.0};
+  double goal_yaw_alignment_last_w_{0.0};
 };
 
 }  // namespace autoware::pure_pursuit
