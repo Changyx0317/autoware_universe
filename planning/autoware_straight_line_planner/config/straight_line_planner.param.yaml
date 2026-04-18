@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    goal_topic: "/planning/mission_planning/goal"
+    fallback_goal_topic: "/planning/mission_planning/echo_back_goal_pose"
+    odom_topic: "/localization/kinematic_state"
+    output_trajectory_topic: "/planning/scenario_planning/trajectory"
+
+    publish_rate_hz: 10.0
+    point_interval_m: 0.1
+    min_num_points: 5
+
+    target_speed_mps: 1.0
+    reverse_target_speed_mps: 1.0
+    stop_at_goal: true
+    enable_reverse_when_goal_behind: true
+    reverse_dot_threshold: 0.0

@@ -6,18 +6,6 @@ rect_coverage_planner:
     rect_width: 6.0
     rect_length: 20.0
     margin: 0.3
-    desired_spacing: 2.0
+    desired_spacing: 1.0
     publish_rate_hz: 1.0
     pose_marker_scale: 0.18
-
-    use_clicked_points: true
-    clicked_point_topic: /clicked_point
-
-    goal_topic: /planning/mission_planning/goal
-    odom_topic: /localization/kinematic_state
-    goal_reach_tolerance_m: 0.1
-    goal_yaw_tolerance_rad: 0.05
-    stop_speed_tolerance_mps: 0.05
-    goal_settle_time_s: 1.0
-    republish_goal_interval_s: 1.0
-    loop_goals: true

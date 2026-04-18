@@ -7,12 +7,13 @@
 #include <string>
 #include <vector>
 
+#include "autoware_adapi_v1_msgs/msg/route_state.hpp"
+#include "autoware_adapi_v1_msgs/srv/clear_route.hpp"
+#include "autoware_adapi_v1_msgs/srv/set_route_points.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/pose_array.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #include "visualization_msgs/msg/marker.hpp"
@@ -21,8 +22,10 @@
 namespace
 {
 
+using autoware_adapi_v1_msgs::msg::RouteState;
+using autoware_adapi_v1_msgs::srv::ClearRoute;
+using autoware_adapi_v1_msgs::srv::SetRoutePoints;
 using geometry_msgs::msg::PointStamped;
-using nav_msgs::msg::Odometry;
 using namespace std::chrono_literals;
 
 constexpr double kPi = 3.14159265358979323846;
@@ -82,21 +85,6 @@ Vec2 normalize(const Vec2 & a)
 Vec2 leftNormal(const Vec2 & a)
 {
   return Vec2{-a.y, a.x};
-}
-
-double normalizeAngle(const double angle)
-{
-  double a = angle;
-  while (a > kPi) a -= 2.0 * kPi;
-  while (a < -kPi) a += 2.0 * kPi;
-  return a;
-}
-
-double yawFromQuat(const geometry_msgs::msg::Quaternion & q)
-{
-  const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-  const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-  return std::atan2(siny_cosp, cosy_cosp);
 }
 
 geometry_msgs::msg::Point makePoint(double x, double y, double z = 0.0)
@@ -161,6 +149,24 @@ std::vector<double> makeUniformSamples(
     samples.push_back(min_value + actual_spacing * static_cast<double>(i));
   }
   return samples;
+}
+
+const char * routeStateToString(uint16_t state)
+{
+  switch (state) {
+    case RouteState::UNKNOWN:
+      return "UNKNOWN";
+    case RouteState::UNSET:
+      return "UNSET";
+    case RouteState::SET:
+      return "SET";
+    case RouteState::ARRIVED:
+      return "ARRIVED";
+    case RouteState::CHANGING:
+      return "CHANGING";
+    default:
+      return "UNRECOGNIZED";
+  }
 }
 
 class RectBoundaryPlanner
@@ -252,26 +258,20 @@ public:
     desired_spacing_ = declare_parameter<double>("desired_spacing", 1.0);
     publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 1.0);
     marker_scale_ = declare_parameter<double>("pose_marker_scale", 0.18);
-
+    allow_goal_modification_ = declare_parameter<bool>("allow_goal_modification", false);
     use_clicked_points_ = declare_parameter<bool>("use_clicked_points", true);
     clicked_point_topic_ =
       declare_parameter<std::string>("clicked_point_topic", "/clicked_point");
-
-    goal_topic_ = declare_parameter<std::string>("goal_topic", "/planning/mission_planning/goal");
-    odom_topic_ =
-      declare_parameter<std::string>("odom_topic", "/localization/kinematic_state");
-    goal_reach_tolerance_m_ = declare_parameter<double>("goal_reach_tolerance_m", 0.6);
-    goal_yaw_tolerance_rad_ = declare_parameter<double>("goal_yaw_tolerance_rad", 0.12);
-    stop_speed_tolerance_mps_ = declare_parameter<double>("stop_speed_tolerance_mps", 0.05);
-    goal_settle_time_s_ = declare_parameter<double>("goal_settle_time_s", 1.0);
-    republish_goal_interval_s_ = declare_parameter<double>("republish_goal_interval_s", 1.0);
-    loop_goals_ = declare_parameter<bool>("loop_goals", true);
+    route_state_topic_ = declare_parameter<std::string>("route_state_topic", "/api/routing/state");
+    set_route_service_ =
+      declare_parameter<std::string>("set_route_service", "/api/routing/set_route_points");
+    clear_route_service_ =
+      declare_parameter<std::string>("clear_route_service", "/api/routing/clear_route");
 
     pose_array_pub_ =
       create_publisher<geometry_msgs::msg::PoseArray>("coverage_pose_array", 10);
     marker_array_pub_ =
       create_publisher<visualization_msgs::msg::MarkerArray>("coverage_markers", 10);
-    goal_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(goal_topic_, 10);
 
     const auto visualization_period =
       std::chrono::duration<double>(1.0 / std::max(0.1, publish_rate_hz_));
@@ -279,8 +279,10 @@ public:
       std::chrono::duration_cast<std::chrono::milliseconds>(visualization_period),
       std::bind(&CoveragePlannerNode::publishVisualization, this));
 
-    odom_sub_ = create_subscription<Odometry>(
-      odom_topic_, 10, std::bind(&CoveragePlannerNode::onOdometry, this, std::placeholders::_1));
+    const auto durable_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    route_state_sub_ = create_subscription<RouteState>(
+      route_state_topic_, durable_qos,
+      std::bind(&CoveragePlannerNode::onRouteState, this, std::placeholders::_1));
 
     if (use_clicked_points_) {
       clicked_point_sub_ = create_subscription<PointStamped>(
@@ -289,14 +291,17 @@ public:
     } else {
       configureFromParameters();
       buildCoveragePlan();
-      scheduleReplan();
     }
 
-    goal_timer_ = create_wall_timer(200ms, std::bind(&CoveragePlannerNode::processGoals, this));
+    set_route_client_ = create_client<SetRoutePoints>(set_route_service_);
+    clear_route_client_ = create_client<ClearRoute>(clear_route_service_);
+    routing_timer_ = create_wall_timer(500ms, std::bind(&CoveragePlannerNode::processRouting, this));
 
     RCLCPP_INFO(get_logger(), "Coverage planner started.");
     RCLCPP_INFO(get_logger(), "frame_id=%s", frame_id_.c_str());
-    RCLCPP_INFO(get_logger(), "goal_topic=%s odom_topic=%s", goal_topic_.c_str(), odom_topic_.c_str());
+    RCLCPP_INFO(
+      get_logger(), "Routing uses %s and %s. /api/routing/route is the route readback topic.",
+      set_route_service_.c_str(), route_state_topic_.c_str());
 
     if (use_clicked_points_) {
       RCLCPP_INFO(
@@ -321,12 +326,6 @@ private:
     lateral_unit_ = makeVec2(0.0, 1.0);
     forward_length_ = rect_width_;
     lateral_length_ = rect_length_;
-  }
-
-  void onOdometry(const Odometry::ConstSharedPtr msg)
-  {
-    latest_odom_ = msg;
-    has_odom_ = true;
   }
 
   void onClickedPoint(const PointStamped::ConstSharedPtr msg)
@@ -409,106 +408,154 @@ private:
       "Rectangle updated: origin=(%.2f, %.2f) forward=%.2f side=%.2f heading=%.1f deg side_dir=%.1f deg",
       rectangle_origin_.x, rectangle_origin_.y, forward_length_, lateral_length_, heading_deg,
       lateral_deg);
-    RCLCPP_INFO(get_logger(), "Generated %zu ordered goals.", poses_.size());
+    RCLCPP_INFO(get_logger(), "Generated %zu ordered route goals.", poses_.size());
   }
 
   void scheduleReplan()
   {
-    current_goal_index_ = 0;
+    replan_requested_ = true;
     active_goal_sent_ = false;
-    waiting_goal_settle_ = false;
-    last_goal_publish_time_ = now();
-    RCLCPP_INFO(get_logger(), "Coverage goals updated. Will publish from the first goal.");
+    advance_goal_after_clear_ = false;
+
+    RCLCPP_INFO(
+      get_logger(),
+      "New rectangle accepted. The node will clear the current route and start from the first goal.");
   }
 
-  void processGoals()
+  void onRouteState(const RouteState::ConstSharedPtr msg)
+  {
+    has_route_state_ = true;
+    if (route_state_ != msg->state) {
+      RCLCPP_INFO(
+        get_logger(), "Route state changed: %s -> %s", routeStateToString(route_state_),
+        routeStateToString(msg->state));
+    }
+    route_state_ = msg->state;
+  }
+
+  void processRouting()
   {
     if (!has_active_rectangle_ || poses_.empty()) {
       return;
     }
 
-    if (!has_odom_ || !latest_odom_) {
+    if (!set_route_client_->service_is_ready() || !clear_route_client_->service_is_ready()) {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 5000, "Waiting for odometry on %s.", odom_topic_.c_str());
+        get_logger(), *get_clock(), 5000, "Waiting for routing services to become available.");
       return;
     }
 
-    const auto now_time = now();
-
-    if (!active_goal_sent_) {
-      publishCurrentGoal("Initial goal published");
+    if (!has_route_state_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000, "Waiting for %s.", route_state_topic_.c_str());
       return;
     }
 
-    const auto & goal = poses_.at(current_goal_index_);
-    const double px = latest_odom_->pose.pose.position.x;
-    const double py = latest_odom_->pose.pose.position.y;
-    const double current_yaw = yawFromQuat(latest_odom_->pose.pose.orientation);
-    const double current_speed = std::abs(latest_odom_->twist.twist.linear.x);
-    const double dist = std::hypot(goal.x - px, goal.y - py);
-    const double yaw_err = std::abs(normalizeAngle(goal.yaw - current_yaw));
+    if (request_in_flight_) {
+      return;
+    }
 
-    const bool reached_and_aligned_and_stopped =
-      dist <= std::max(0.01, goal_reach_tolerance_m_) &&
-      yaw_err <= std::max(0.01, goal_yaw_tolerance_rad_) &&
-      current_speed <= std::max(0.0, stop_speed_tolerance_mps_);
-
-    if (reached_and_aligned_and_stopped) {
-      if (!waiting_goal_settle_) {
-        waiting_goal_settle_ = true;
-        goal_settle_start_time_ = now_time;
-        RCLCPP_INFO(
-          get_logger(),
-          "Goal %zu/%zu reached+aligned+stopped. Waiting %.2f s before next goal.",
-          current_goal_index_ + 1, poses_.size(), std::max(0.0, goal_settle_time_s_));
+    if (replan_requested_) {
+      if (route_state_ != RouteState::UNSET) {
+        if (!awaiting_route_clear_) {
+          requestClearRoute("New rectangle received. Clearing the existing route.", false);
+        }
         return;
       }
 
-      const double settle_elapsed = (now_time - goal_settle_start_time_).seconds();
-      if (settle_elapsed < std::max(0.0, goal_settle_time_s_)) {
-        return;
-      }
+      awaiting_route_clear_ = false;
+      replan_requested_ = false;
+      active_goal_sent_ = false;
+    }
 
-      if (current_goal_index_ + 1 < poses_.size()) {
-        current_goal_index_++;
-      } else if (loop_goals_) {
-        current_goal_index_ = 0;
-      } else {
-        RCLCPP_INFO_THROTTLE(
-          get_logger(), *get_clock(), 3000,
-          "Final goal reached and loop_goals=false. Holding the last goal.");
-      }
-      waiting_goal_settle_ = false;
-      publishCurrentGoal("Goal reached, publishing next");
+    if (route_state_ == RouteState::ARRIVED && active_goal_sent_ && !awaiting_route_clear_) {
+      requestClearRoute("Reached current goal. Clearing route before sending the next goal.", true);
       return;
     }
-    waiting_goal_settle_ = false;
 
-    const double republish_interval = std::max(0.1, republish_goal_interval_s_);
-    if ((now_time - last_goal_publish_time_).seconds() >= republish_interval) {
-      publishCurrentGoal("Republishing active goal");
+    if (route_state_ == RouteState::UNSET) {
+      if (awaiting_route_clear_) {
+        awaiting_route_clear_ = false;
+        active_goal_sent_ = false;
+        if (advance_goal_after_clear_) {
+          advanceGoalIndex();
+        }
+        advance_goal_after_clear_ = false;
+      }
+
+      if (!active_goal_sent_) {
+        requestNextGoal();
+      }
     }
   }
 
-  void publishCurrentGoal(const std::string & reason)
+  void requestNextGoal()
   {
-    if (poses_.empty()) {
-      return;
-    }
-
     const auto & goal = poses_.at(current_goal_index_);
-    geometry_msgs::msg::PoseStamped msg;
-    msg.header.frame_id = frame_id_;
-    msg.header.stamp = now();
-    msg.pose = makePose(goal.x, goal.y, goal.yaw);
-    goal_pub_->publish(msg);
+    auto request = std::make_shared<SetRoutePoints::Request>();
+    request->header.frame_id = frame_id_;
+    request->header.stamp = now();
+    request->goal = makePose(goal.x, goal.y, goal.yaw);
+    request->option.allow_goal_modification = allow_goal_modification_;
 
-    last_goal_publish_time_ = msg.header.stamp;
-    active_goal_sent_ = true;
+    request_in_flight_ = true;
+    const size_t goal_index = current_goal_index_;
 
     RCLCPP_INFO(
-      get_logger(), "%s: goal %zu/%zu x=%.2f y=%.2f yaw=%.1f deg", reason.c_str(),
-      current_goal_index_ + 1, poses_.size(), goal.x, goal.y, goal.yaw * 180.0 / kPi);
+      get_logger(), "Sending goal %zu/%zu: x=%.2f y=%.2f yaw=%.1f deg", goal_index + 1,
+      poses_.size(), goal.x, goal.y, goal.yaw * 180.0 / kPi);
+
+    set_route_client_->async_send_request(
+      request,
+      [this, goal_index](rclcpp::Client<SetRoutePoints>::SharedFuture future) {
+        request_in_flight_ = false;
+
+        const auto response = future.get();
+        if (!response->status.success) {
+          RCLCPP_ERROR(
+            get_logger(), "Failed to set goal %zu: code=%u message=%s", goal_index + 1,
+            response->status.code, response->status.message.c_str());
+          return;
+        }
+
+        active_goal_sent_ = true;
+        RCLCPP_INFO(get_logger(), "Goal %zu accepted by routing service.", goal_index + 1);
+      });
+  }
+
+  void requestClearRoute(const std::string & reason, bool advance_goal_after_clear)
+  {
+    auto request = std::make_shared<ClearRoute::Request>();
+    request_in_flight_ = true;
+    awaiting_route_clear_ = true;
+    advance_goal_after_clear_ = advance_goal_after_clear;
+
+    RCLCPP_INFO(get_logger(), "%s", reason.c_str());
+
+    clear_route_client_->async_send_request(
+      request, [this](rclcpp::Client<ClearRoute>::SharedFuture future) {
+        request_in_flight_ = false;
+
+        const auto response = future.get();
+        if (!response->status.success) {
+          awaiting_route_clear_ = false;
+          advance_goal_after_clear_ = false;
+          RCLCPP_ERROR(
+            get_logger(), "Failed to clear route: code=%u message=%s", response->status.code,
+            response->status.message.c_str());
+          return;
+        }
+
+        RCLCPP_INFO(get_logger(), "Route clear accepted. Waiting for UNSET state.");
+      });
+  }
+
+  void advanceGoalIndex()
+  {
+    current_goal_index_ = (current_goal_index_ + 1) % poses_.size();
+    RCLCPP_INFO(
+      get_logger(), "Advancing to next goal. Next index is %zu/%zu.", current_goal_index_ + 1,
+      poses_.size());
   }
 
   void publishVisualization()
@@ -647,8 +694,9 @@ private:
 
   std::string frame_id_;
   std::string clicked_point_topic_;
-  std::string goal_topic_;
-  std::string odom_topic_;
+  std::string route_state_topic_;
+  std::string set_route_service_;
+  std::string clear_route_service_;
   double origin_x_{0.0};
   double origin_y_{0.0};
   double rect_width_{0.0};
@@ -657,17 +705,17 @@ private:
   double desired_spacing_{0.0};
   double publish_rate_hz_{1.0};
   double marker_scale_{0.18};
+  bool allow_goal_modification_{false};
   bool use_clicked_points_{true};
-  double goal_reach_tolerance_m_{0.6};
-  double goal_yaw_tolerance_rad_{0.12};
-  double stop_speed_tolerance_mps_{0.05};
-  double goal_settle_time_s_{1.0};
-  double republish_goal_interval_s_{1.0};
-  bool loop_goals_{true};
 
+  bool has_route_state_{false};
   bool has_active_rectangle_{false};
+  bool request_in_flight_{false};
   bool active_goal_sent_{false};
-  bool has_odom_{false};
+  bool awaiting_route_clear_{false};
+  bool advance_goal_after_clear_{false};
+  bool replan_requested_{false};
+  uint16_t route_state_{RouteState::UNKNOWN};
   size_t current_goal_index_{0};
 
   Vec2 rectangle_origin_{0.0, 0.0};
@@ -680,18 +728,14 @@ private:
   std::unique_ptr<RectBoundaryPlanner> planner_;
   std::vector<Pose2D> poses_;
 
-  rclcpp::Time last_goal_publish_time_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time goal_settle_start_time_{0, 0, RCL_ROS_TIME};
-  bool waiting_goal_settle_{false};
-
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pose_array_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
   rclcpp::Subscription<PointStamped>::SharedPtr clicked_point_sub_;
-  rclcpp::Subscription<Odometry>::SharedPtr odom_sub_;
-  Odometry::ConstSharedPtr latest_odom_;
+  rclcpp::Subscription<RouteState>::SharedPtr route_state_sub_;
+  rclcpp::Client<SetRoutePoints>::SharedPtr set_route_client_;
+  rclcpp::Client<ClearRoute>::SharedPtr clear_route_client_;
   rclcpp::TimerBase::SharedPtr visualization_timer_;
-  rclcpp::TimerBase::SharedPtr goal_timer_;
+  rclcpp::TimerBase::SharedPtr routing_timer_;
 };
 
 }  // namespace

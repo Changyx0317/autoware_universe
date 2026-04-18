@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>autoware_straight_line_planner</name>
+  <version>0.1.0</version>
+  <description>Generate a straight-line trajectory from current pose to goal pose with constant speed.</description>
+
+  <maintainer email="chang@example.com">chang</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>autoware_planning_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
