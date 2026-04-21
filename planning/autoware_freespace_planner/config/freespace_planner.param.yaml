@@ -41,6 +41,12 @@
       smoothness_weight: 0.5
       obstacle_distance_weight: 1.75
       goal_lat_distance_weight: 5.0
+      motion_model: "diff_drive"  # options: bicycle, diff_drive
+      enable_direct_three_phase_maneuver: true
+      max_curvature: 0.7
+      allow_in_place_turn: false
+      in_place_turn_angle_rad: 0.174532925
+      in_place_turn_cost: 0.2
 
     # -- RRT* search Configurations --
     rrtstar:

@@ -55,6 +55,13 @@ struct AstarParam
   double smoothness_weight;
   double obstacle_distance_weight;
   double goal_lat_distance_weight;
+
+  // diff-drive extensions
+  std::string motion_model{"bicycle"};  // bicycle or diff_drive
+  double max_curvature{0.5};            // [1/m], used only in diff_drive motion model
+  bool allow_in_place_turn{false};      // allow yaw-only primitives in diff_drive mode
+  double in_place_turn_angle{0.0872664626};  // [rad], yaw step for in-place primitive
+  double in_place_turn_cost{0.2};  // [m] equivalent cost for in-place primitive
 };
 
 struct AstarNode
@@ -116,7 +123,12 @@ public:
         node.declare_parameter<double>("astar.distance_heuristic_weight"),
         node.declare_parameter<double>("astar.smoothness_weight"),
         node.declare_parameter<double>("astar.obstacle_distance_weight"),
-        node.declare_parameter<double>("astar.goal_lat_distance_weight")},
+        node.declare_parameter<double>("astar.goal_lat_distance_weight"),
+        node.declare_parameter<std::string>("astar.motion_model", "bicycle"),
+        node.declare_parameter<double>("astar.max_curvature", 0.5),
+        node.declare_parameter<bool>("astar.allow_in_place_turn", false),
+        node.declare_parameter<double>("astar.in_place_turn_angle_rad", 0.0872664626),
+        node.declare_parameter<double>("astar.in_place_turn_cost", 0.2)},
       node.get_clock())
   {
   }
@@ -144,6 +156,8 @@ private:
   bool isGoal(const AstarNode & node) const;
   void setShiftedGoalPose(const Pose & goal_pose, const double lat_offset) const;
   Pose node2pose(const AstarNode & node) const;
+  Pose getNextPose(const Pose & current_pose, int steering_index, double distance) const;
+  void expandInPlaceRotations(AstarNode & current_node);
 
   double getExpansionDistance(const AstarNode & current_node) const;
   double getSteeringCost(const int steering_index) const;
@@ -178,6 +192,8 @@ private:
   double min_expansion_dist_;
   double max_expansion_dist_;
   double near_goal_dist_;
+  double curvature_resolution_;
+  bool is_diff_drive_model_;
   bool is_backward_search_;
   bool is_multiple_goals_;
 

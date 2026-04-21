@@ -170,6 +170,32 @@
               "type": "number",
               "default": 0.5,
               "description": "Weight for lateral distance from original goal."
+            },
+            "motion_model": {
+              "type": "string",
+              "enum": ["bicycle", "diff_drive"],
+              "default": "bicycle",
+              "description": "Motion model used by A*: bicycle or diff_drive."
+            },
+            "max_curvature": {
+              "type": "number",
+              "default": 0.5,
+              "description": "Maximum curvature [1/m] used by diff_drive motion model."
+            },
+            "allow_in_place_turn": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable in-place yaw primitives in diff_drive mode."
+            },
+            "in_place_turn_angle_rad": {
+              "type": "number",
+              "default": 0.0872664626,
+              "description": "Yaw step [rad] for in-place turning primitives."
+            },
+            "in_place_turn_cost": {
+              "type": "number",
+              "default": 0.2,
+              "description": "Equivalent distance cost for each in-place turn primitive."
             }
           },
           "required": [

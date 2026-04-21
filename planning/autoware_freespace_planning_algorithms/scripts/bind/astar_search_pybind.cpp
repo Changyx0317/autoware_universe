@@ -135,7 +135,16 @@ PYBIND11_MODULE(autoware_freespace_planning_algorithms_pybind, p)
         &freespace_planning_algorithms::AstarParam::obstacle_distance_weight)
       .def_readwrite(
         "goal_lat_distance_weight",
-        &freespace_planning_algorithms::AstarParam::goal_lat_distance_weight);
+        &freespace_planning_algorithms::AstarParam::goal_lat_distance_weight)
+      .def_readwrite("motion_model", &freespace_planning_algorithms::AstarParam::motion_model)
+      .def_readwrite(
+        "max_curvature", &freespace_planning_algorithms::AstarParam::max_curvature)
+      .def_readwrite(
+        "allow_in_place_turn", &freespace_planning_algorithms::AstarParam::allow_in_place_turn)
+      .def_readwrite(
+        "in_place_turn_angle", &freespace_planning_algorithms::AstarParam::in_place_turn_angle)
+      .def_readwrite(
+        "in_place_turn_cost", &freespace_planning_algorithms::AstarParam::in_place_turn_cost);
   auto pyPlannerCommonParam =
     py::class_<freespace_planning_algorithms::PlannerCommonParam>(
       p, "PlannerCommonParam", py::dynamic_attr())

@@ -11,6 +11,9 @@
 
   <node pkg="topic_tools" exec="relay" name="scenario_trajectory_relay" output="log" args="$(var input_lane_driving_trajectory) $(var output_trajectory)"/>
 
-  <arg name="cmd" default="ros2 topic pub $(var output_scenario) tier4_planning_msgs/msg/Scenario '{current_scenario: LaneDriving, activating_scenarios: [LaneDriving]}'"/>
+  <arg
+    name="cmd"
+    default="ros2 topic pub -r 1 $(var output_scenario) tier4_planning_msgs/msg/Scenario &quot;{current_scenario: 'LaneDriving', activating_scenarios: ['LaneDriving']}&quot;"
+  />
   <executable cmd="$(var cmd)" name="scenario_pub" output="screen" shell="true"/>
 </launch>

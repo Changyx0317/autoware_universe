@@ -16,6 +16,7 @@
 
 #include "autoware/freespace_planning_algorithms/abstract_algorithm.hpp"
 #include "autoware/freespace_planning_algorithms/kinematic_bicycle_model.hpp"
+#include "autoware/freespace_planning_algorithms/kinematic_diff_drive_model.hpp"
 
 #include <autoware_utils/geometry/geometry.hpp>
 #include <autoware_utils/math/unit_conversion.hpp>
@@ -76,14 +77,26 @@ AstarSearch::AstarSearch(
   goal_node_(nullptr),
   use_reeds_shepp_(true)
 {
+  is_diff_drive_model_ = (astar_param_.motion_model == "diff_drive");
   steering_resolution_ =
     collision_vehicle_shape_.max_steering / planner_common_param_.turning_steps;
   heading_resolution_ = 2.0 * M_PI / planner_common_param_.theta_size;
+  curvature_resolution_ =
+    planner_common_param_.turning_steps > 0
+      ? astar_param_.max_curvature / planner_common_param_.turning_steps
+      : 0.0;
 
-  const double avg_steering =
-    steering_resolution_ + (collision_vehicle_shape_.max_steering - steering_resolution_) / 2.0;
-  avg_turning_radius_ =
-    kinematic_bicycle_model::getTurningRadius(collision_vehicle_shape_.base_length, avg_steering);
+  if (is_diff_drive_model_) {
+    use_reeds_shepp_ = false;
+    avg_turning_radius_ =
+      std::abs(astar_param_.max_curvature) > 1e-3 ? 1.0 / std::abs(astar_param_.max_curvature)
+                                                  : std::numeric_limits<double>::max();
+  } else {
+    const double avg_steering =
+      steering_resolution_ + (collision_vehicle_shape_.max_steering - steering_resolution_) / 2.0;
+    avg_turning_radius_ =
+      kinematic_bicycle_model::getTurningRadius(collision_vehicle_shape_.base_length, avg_steering);
+  }
 
   is_backward_search_ = astar_param_.search_method == "backward";
 
@@ -102,14 +115,26 @@ AstarSearch::AstarSearch(
   goal_node_(nullptr),
   use_reeds_shepp_(true)
 {
+  is_diff_drive_model_ = (astar_param_.motion_model == "diff_drive");
   steering_resolution_ =
     collision_vehicle_shape_.max_steering / planner_common_param_.turning_steps;
   heading_resolution_ = 2.0 * M_PI / planner_common_param_.theta_size;
+  curvature_resolution_ =
+    planner_common_param_.turning_steps > 0
+      ? astar_param_.max_curvature / planner_common_param_.turning_steps
+      : 0.0;
 
-  const double avg_steering =
-    steering_resolution_ + (collision_vehicle_shape_.max_steering - steering_resolution_) / 2.0;
-  avg_turning_radius_ =
-    kinematic_bicycle_model::getTurningRadius(collision_vehicle_shape_.base_length, avg_steering);
+  if (is_diff_drive_model_) {
+    use_reeds_shepp_ = false;
+    avg_turning_radius_ =
+      std::abs(astar_param_.max_curvature) > 1e-3 ? 1.0 / std::abs(astar_param_.max_curvature)
+                                                  : std::numeric_limits<double>::max();
+  } else {
+    const double avg_steering =
+      steering_resolution_ + (collision_vehicle_shape_.max_steering - steering_resolution_) / 2.0;
+    avg_turning_radius_ =
+      kinematic_bicycle_model::getTurningRadius(collision_vehicle_shape_.base_length, avg_steering);
+  }
 
   is_backward_search_ = astar_param_.search_method == "backward";
 
@@ -334,9 +359,7 @@ void AstarSearch::expandNodes(AstarNode & current_node, const bool is_back)
       continue;
     }
 
-    const double steering = static_cast<double>(steering_index) * steering_resolution_;
-    const auto next_pose = kinematic_bicycle_model::getPose(
-      current_pose, collision_vehicle_shape_.base_length, steering, distance);
+    const auto next_pose = getNextPose(current_pose, steering_index, distance);
     const auto next_index = pose2index(costmap_, next_pose, planner_common_param_.theta_size);
 
     if (isOutOfRange(next_index) || isObs(next_index)) continue;
@@ -371,6 +394,10 @@ void AstarSearch::expandNodes(AstarNode & current_node, const bool is_back)
       openlist_.push(next_node);
       continue;
     }
+  }
+
+  if (!is_back) {
+    expandInPlaceRotations(current_node);
   }
 }
 
@@ -453,9 +480,7 @@ void AstarSearch::setPath(const AstarNode & goal_node)
     for (int i = 1; i < n; ++i) {
       const double dist =
         ((distance_2d * i) / n) * (node.is_back == is_backward_search_ ? 1.0 : -1.0);
-      const double steering = node.steering_index * steering_resolution_;
-      const auto local_pose = kinematic_bicycle_model::getPose(
-        parent_pose, collision_vehicle_shape_.base_length, steering, dist);
+      const auto local_pose = getNextPose(parent_pose, node.steering_index, dist);
       pose.pose = local2global(costmap_, local_pose);
       waypoints.push_back({pose, node.is_back});
     }
@@ -572,6 +597,56 @@ Pose AstarSearch::node2pose(const AstarNode & node) const
   pose_local.orientation = autoware_utils::create_quaternion_from_yaw(node.theta);
 
   return pose_local;
+}
+
+Pose AstarSearch::getNextPose(
+  const Pose & current_pose, const int steering_index, const double distance) const
+{
+  if (is_diff_drive_model_) {
+    const double curvature = static_cast<double>(steering_index) * curvature_resolution_;
+    return kinematic_diff_drive_model::getPoseFromCurvature(current_pose, curvature, distance);
+  }
+
+  const double steering = static_cast<double>(steering_index) * steering_resolution_;
+  return kinematic_bicycle_model::getPose(
+    current_pose, collision_vehicle_shape_.base_length, steering, distance);
+}
+
+void AstarSearch::expandInPlaceRotations(AstarNode & current_node)
+{
+  if (!is_diff_drive_model_ || !astar_param_.allow_in_place_turn) return;
+
+  const auto current_pose = node2pose(current_node);
+  const double yaw_step =
+    std::max(std::abs(astar_param_.in_place_turn_angle), 0.5 * heading_resolution_);
+
+  for (const int dir : {1, -1}) {
+    auto next_pose = current_pose;
+    const double yaw = tf2::getYaw(current_pose.orientation) + static_cast<double>(dir) * yaw_step;
+    next_pose.orientation = autoware_utils::create_quaternion_from_yaw(yaw);
+    const auto next_index = pose2index(costmap_, next_pose, planner_common_param_.theta_size);
+
+    if (isOutOfRange(next_index) || isObs(next_index)) continue;
+
+    AstarNode * next_node = &graph_[getKey(next_index)];
+    if (next_node->status == NodeStatus::Closed || detectCollision(next_index)) continue;
+
+    const auto obs_edt = getObstacleEDT(next_index);
+    const double move_cost = current_node.gc + astar_param_.in_place_turn_cost +
+                             astar_param_.smoothness_weight *
+                               (std::abs(astar_param_.in_place_turn_angle) / M_PI);
+    const double total_cost = move_cost + estimateCost(next_pose, next_index);
+
+    if (next_node->status == NodeStatus::None || next_node->fc > total_cost) {
+      next_node->status = NodeStatus::Open;
+      next_node->set(next_pose, move_cost, total_cost, dir * planner_common_param_.turning_steps, false);
+      next_node->dir_distance = current_node.dir_distance;
+      next_node->dist_to_goal = calc_distance2d(next_pose, goal_pose_);
+      next_node->dist_to_obs = obs_edt.distance;
+      next_node->parent = &current_node;
+      openlist_.push(next_node);
+    }
+  }
 }
 
 }  // namespace autoware::freespace_planning_algorithms
