@@ -101,37 +101,34 @@ void assignTimeFromStart(Trajectory & traj)
 
 void appendStraightSegment(
   Trajectory & traj, const Pose & start_pose, const Pose & goal_pose, const double speed_mps,
-  const double ds)
+  const double ds, const double heading_yaw)
 {
   const double dx = goal_pose.position.x - start_pose.position.x;
   const double dy = goal_pose.position.y - start_pose.position.y;
   const double dist = std::hypot(dx, dy);
   if (dist < 1e-3) return;
 
-  const double yaw = std::atan2(dy, dx);
   const int n = std::max(2, static_cast<int>(std::ceil(dist / ds)));
   for (int i = 1; i <= n; ++i) {
     const double ratio = static_cast<double>(i) / static_cast<double>(n);
     Pose pose = start_pose;
     pose.position.x = start_pose.position.x + ratio * dx;
     pose.position.y = start_pose.position.y + ratio * dy;
-    pose.orientation = autoware_utils::create_quaternion_from_yaw(yaw);
+    pose.orientation = autoware_utils::create_quaternion_from_yaw(heading_yaw);
     traj.points.push_back(makeTrajectoryPoint(pose, speed_mps, 0.0));
   }
 }
 
 geometry_msgs::msg::PoseArray makeThreePhasePoseArray(
-  const Pose & start_pose, const Pose & goal_pose, const double ds, const double yaw_step)
+  const Pose & start_pose, const Pose & goal_pose, const double ds, const double heading_yaw)
 {
-  (void)yaw_step;
   geometry_msgs::msg::PoseArray arr;
   const double dx = goal_pose.position.x - start_pose.position.x;
   const double dy = goal_pose.position.y - start_pose.position.y;
-  const double path_yaw = std::atan2(dy, dx);
   const double dist = std::hypot(dx, dy);
 
   Pose aligned_start = start_pose;
-  aligned_start.orientation = autoware_utils::create_quaternion_from_yaw(path_yaw);
+  aligned_start.orientation = autoware_utils::create_quaternion_from_yaw(heading_yaw);
   arr.poses.push_back(aligned_start);
 
   if (dist > 1e-3) {
@@ -141,7 +138,7 @@ geometry_msgs::msg::PoseArray makeThreePhasePoseArray(
       Pose p = start_pose;
       p.position.x = start_pose.position.x + ratio * dx;
       p.position.y = start_pose.position.y + ratio * dy;
-      p.orientation = autoware_utils::create_quaternion_from_yaw(path_yaw);
+      p.orientation = autoware_utils::create_quaternion_from_yaw(heading_yaw);
       arr.poses.push_back(p);
     }
   }
@@ -500,31 +497,43 @@ void FreespacePlannerNode::planTrajectory()
 
   if (is_diff_drive && enable_direct_three_phase_maneuver) {
     const double ds = std::max(0.1, 1.5 * occupancy_grid_->info.resolution);
-    const double yaw_step = M_PI / 18.0;
+    const double dx = goal_pose_in_costmap_frame.position.x - current_pose_in_costmap_frame.position.x;
+    const double dy = goal_pose_in_costmap_frame.position.y - current_pose_in_costmap_frame.position.y;
+    const double dist = std::hypot(dx, dy);
+    const double path_yaw = (dist > 1e-6) ? std::atan2(dy, dx) : getYaw(current_pose_in_costmap_frame);
+    const double current_yaw = getYaw(current_pose_in_costmap_frame);
+    const double front_align_error =
+      std::abs(autoware_utils::normalize_radian(path_yaw - current_yaw));
+    const double rear_heading_yaw = path_yaw + M_PI;
+    const double rear_align_error =
+      std::abs(autoware_utils::normalize_radian(rear_heading_yaw - current_yaw));
+    // Choose the mode that requires smaller in-place rotation at start:
+    // forward: align front to path_yaw, reverse: align rear to path_yaw (vehicle yaw = path_yaw + pi).
+    const bool use_reverse = dist > 1e-6 && rear_align_error < front_align_error;
+    const double heading_yaw = use_reverse ? (path_yaw + M_PI) : path_yaw;
+
     const auto candidate_local_poses = makeThreePhasePoseArray(
-      current_pose_in_costmap_frame, goal_pose_in_costmap_frame, ds, yaw_step);
+      current_pose_in_costmap_frame, goal_pose_in_costmap_frame, ds, heading_yaw);
     if (!algo_->hasObstacleOnTrajectory(candidate_local_poses)) {
       Trajectory direct_traj;
       direct_traj.header.stamp = get_clock()->now();
       direct_traj.header.frame_id = occupancy_grid_->header.frame_id;
 
-      const double speed_mps = node_param_.waypoints_velocity / 3.6;
+      const double speed_mps_abs = node_param_.waypoints_velocity / 3.6;
+      const double speed_mps = use_reverse ? -std::abs(speed_mps_abs) : std::abs(speed_mps_abs);
       const Pose & start_global = current_pose_in_costmap_frame;
       const Pose & goal_global = goal_pose_in_costmap_frame;
-      const double path_yaw = std::atan2(
-        goal_global.position.y - start_global.position.y,
-        goal_global.position.x - start_global.position.x);
 
       Pose aligned_start = start_global;
-      aligned_start.orientation = autoware_utils::create_quaternion_from_yaw(path_yaw);
+      aligned_start.orientation = autoware_utils::create_quaternion_from_yaw(heading_yaw);
 
       Pose goal_path_yaw = goal_global;
-      goal_path_yaw.orientation = autoware_utils::create_quaternion_from_yaw(path_yaw);
+      goal_path_yaw.orientation = autoware_utils::create_quaternion_from_yaw(heading_yaw);
 
       // Phase-1 + Phase-2:
       // Start with forward-speed points so longitudinal controller does not enter stop state early.
       direct_traj.points.push_back(makeTrajectoryPoint(aligned_start, speed_mps, 0.0));
-      appendStraightSegment(direct_traj, aligned_start, goal_path_yaw, speed_mps, ds);
+      appendStraightSegment(direct_traj, aligned_start, goal_path_yaw, speed_mps, ds, heading_yaw);
       if (direct_traj.points.size() < 2) {
         direct_traj.points.push_back(makeTrajectoryPoint(goal_path_yaw, speed_mps, 0.0));
       }
@@ -563,6 +572,42 @@ void FreespacePlannerNode::planTrajectory()
     RCLCPP_DEBUG(get_logger(), "Found goal!");
     trajectory_ = utils::create_trajectory(
       current_pose_, algo_->getWaypoints(), node_param_.waypoints_velocity);
+
+    // Improve terminal convergence for curved parking paths:
+    // 1) Keep one clear terminal stop point at the exact goal pose/yaw.
+    // 2) Ensure there is a short pre-goal point with non-zero speed to avoid early stop lock.
+    if (trajectory_.points.size() >= 2) {
+      auto & last = trajectory_.points.back();
+      const auto & prev = trajectory_.points.at(trajectory_.points.size() - 2);
+
+      const double dx = goal_pose_.pose.position.x - prev.pose.position.x;
+      const double dy = goal_pose_.pose.position.y - prev.pose.position.y;
+      const double dist_to_goal_from_prev = std::hypot(dx, dy);
+
+      if (dist_to_goal_from_prev > 0.30) {
+        auto approach = last;
+        const double backoff = 0.20;  // [m]
+        const double ratio = std::max(0.0, (dist_to_goal_from_prev - backoff) / dist_to_goal_from_prev);
+        approach.pose.position.x = prev.pose.position.x + ratio * dx;
+        approach.pose.position.y = prev.pose.position.y + ratio * dy;
+        approach.pose.position.z =
+          prev.pose.position.z + ratio * (goal_pose_.pose.position.z - prev.pose.position.z);
+        approach.pose.orientation = prev.pose.orientation;
+        approach.longitudinal_velocity_mps = prev.longitudinal_velocity_mps;
+        approach.heading_rate_rps = 0.0F;
+
+        trajectory_.points.insert(trajectory_.points.end() - 1, approach);
+      }
+
+      last.pose = goal_pose_.pose;
+      last.longitudinal_velocity_mps = 0.0F;
+      last.heading_rate_rps = 0.0F;
+    } else if (trajectory_.points.size() == 1) {
+      trajectory_.points.front().pose = goal_pose_.pose;
+      trajectory_.points.front().longitudinal_velocity_mps = 0.0F;
+      trajectory_.points.front().heading_rate_rps = 0.0F;
+    }
+
     assignTimeFromStart(trajectory_);
     reversing_indices_ = utils::get_reversing_indices(trajectory_);
     prev_target_index_ = 0;
