@@ -511,6 +511,11 @@ void FreespacePlannerNode::planTrajectory()
     // forward: align front to path_yaw, reverse: align rear to path_yaw (vehicle yaw = path_yaw + pi).
     const bool use_reverse = dist > 1e-6 && rear_align_error < front_align_error;
     const double heading_yaw = use_reverse ? (path_yaw + M_PI) : path_yaw;
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Diff-drive start alignment select: %s (dist=%.2f m, front_err=%.1f deg, rear_err=%.1f deg)",
+      use_reverse ? "REAR(reverse)" : "FRONT(forward)", dist, front_align_error * 180.0 / M_PI,
+      rear_align_error * 180.0 / M_PI);
 
     const auto candidate_local_poses = makeThreePhasePoseArray(
       current_pose_in_costmap_frame, goal_pose_in_costmap_frame, ds, heading_yaw);
@@ -552,7 +557,10 @@ void FreespacePlannerNode::planTrajectory()
       RCLCPP_INFO(get_logger(), "Use direct diff-drive three-phase maneuver.");
       return;
     }
-    RCLCPP_DEBUG(get_logger(), "Direct three-phase maneuver blocked by obstacle. Fallback to A*.");
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Direct three-phase blocked by obstacle. Fallback to A* (selected %s alignment).",
+      use_reverse ? "REAR(reverse)" : "FRONT(forward)");
   }
 
   // execute planning

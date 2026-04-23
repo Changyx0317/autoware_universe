@@ -42,6 +42,7 @@
 #include "autoware_control_msgs/msg/lateral.hpp"
 #include "autoware_internal_debug_msgs/msg/float32_multi_array_stamped.hpp"
 #include "autoware_planning_msgs/msg/trajectory.hpp"
+#include "builtin_interfaces/msg/time.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -192,12 +193,20 @@ private:
   // Debug
   mutable DebugData debug_data_;
   bool heading_alignment_active_{false};
+  int heading_alignment_direction_{0};  // +1/-1 while aligning, 0 not set
+  bool heading_alignment_goal_locked_{false};
+  double heading_alignment_goal_yaw_{0.0};
   bool goal_yaw_alignment_active_{false};
   bool goal_yaw_alignment_goal_locked_{false};
   int goal_yaw_alignment_direction_{0};  // +1/-1 while aligning, 0 not set
   bool goal_yaw_alignment_done_hold_{false};
   double goal_yaw_alignment_goal_yaw_{0.0};
   double goal_yaw_alignment_last_w_{0.0};
+  bool goal_stop_lock_active_{false};
+  builtin_interfaces::msg::Time goal_stop_lock_traj_stamp_{};
+  double goal_stop_lock_goal_x_{0.0};
+  double goal_stop_lock_goal_y_{0.0};
+  double goal_stop_lock_goal_yaw_{0.0};
 };
 
 }  // namespace autoware::pure_pursuit

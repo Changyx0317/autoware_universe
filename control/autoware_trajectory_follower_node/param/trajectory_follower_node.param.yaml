@@ -2,3 +2,17 @@
   ros__parameters:
     ctrl_period: 0.03
     timeout_thr_sec: 0.5
+    parking_three_phase.enable: true
+    parking_three_phase.stop_velocity_threshold_mps: 0.05
+    parking_three_phase.pre_align_enter_yaw_threshold_rad: 0.10
+    parking_three_phase.pre_align_exit_yaw_threshold_rad: 0.05
+    parking_three_phase.pre_align_min_target_distance_m: 0.30
+    parking_three_phase.post_align_enter_distance_m: 0.35
+    parking_three_phase.post_align_keep_distance_m: 0.55
+    parking_three_phase.post_align_enter_yaw_threshold_rad: 0.10
+    parking_three_phase.post_align_exit_yaw_threshold_rad: 0.05
+    parking_three_phase.align_kp: 1.2
+    parking_three_phase.align_min_omega_rps: 0.05
+    parking_three_phase.align_max_omega_rps: 0.35
+    parking_three_phase.hold_unlock_goal_distance_m: 0.20
+    parking_three_phase.hold_unlock_goal_yaw_rad: 0.20

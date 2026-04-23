@@ -400,6 +400,7 @@ private:
     poses_ = planner_->generateBoundaryPath();
     has_active_rectangle_ = true;
     current_goal_index_ = 0;
+    coverage_completed_ = false;
 
     const double heading_deg = std::atan2(forward_unit_.y, forward_unit_.x) * 180.0 / kPi;
     const double lateral_deg = std::atan2(lateral_unit_.y, lateral_unit_.x) * 180.0 / kPi;
@@ -414,6 +415,7 @@ private:
   void scheduleReplan()
   {
     replan_requested_ = true;
+    coverage_completed_ = false;
     active_goal_sent_ = false;
     advance_goal_after_clear_ = false;
 
@@ -468,7 +470,22 @@ private:
       active_goal_sent_ = false;
     }
 
+    if (coverage_completed_) {
+      return;
+    }
+
     if (route_state_ == RouteState::ARRIVED && active_goal_sent_ && !awaiting_route_clear_) {
+      if (current_goal_index_ + 1 >= poses_.size()) {
+        coverage_completed_ = true;
+        active_goal_sent_ = false;
+        advance_goal_after_clear_ = false;
+        awaiting_route_clear_ = false;
+        RCLCPP_INFO(
+          get_logger(),
+          "Reached the final goal (%zu/%zu). Coverage completed, holding position.",
+          current_goal_index_ + 1, poses_.size());
+        return;
+      }
       requestClearRoute("Reached current goal. Clearing route before sending the next goal.", true);
       return;
     }
@@ -715,6 +732,7 @@ private:
   bool awaiting_route_clear_{false};
   bool advance_goal_after_clear_{false};
   bool replan_requested_{false};
+  bool coverage_completed_{false};
   uint16_t route_state_{RouteState::UNKNOWN};
   size_t current_goal_index_{0};
 

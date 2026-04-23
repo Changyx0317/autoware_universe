@@ -50,6 +50,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cmath>
 
 namespace autoware::motion::control
 {
@@ -161,6 +162,62 @@ private:
   void publishProcessingTime(
     const double t_ms, const rclcpp::Publisher<Float64Stamped>::SharedPtr pub);
   StopWatch<std::chrono::milliseconds> stop_watch_;
+
+  enum class ParkingThreePhaseState {
+    PRE_ALIGN = 0,
+    TRACK = 1,
+    POST_ALIGN = 2,
+    HOLD = 3
+  };
+
+  struct ParkingThreePhaseParam
+  {
+    bool enable{false};
+    double stop_velocity_threshold{0.05};
+    double pre_align_enter_yaw_threshold{0.10};
+    double pre_align_exit_yaw_threshold{0.05};
+    double pre_align_min_target_distance{0.30};
+    double post_align_enter_distance{0.35};
+    double post_align_keep_distance{0.55};
+    double post_align_enter_yaw_threshold{0.10};
+    double post_align_exit_yaw_threshold{0.05};
+    double align_kp{1.2};
+    double align_min_omega{0.05};
+    double align_max_omega{0.35};
+    double hold_unlock_goal_distance{0.20};
+    double hold_unlock_goal_yaw{0.20};
+  };
+
+  ParkingThreePhaseParam parking_three_phase_param_{};
+  ParkingThreePhaseState parking_three_phase_state_{ParkingThreePhaseState::TRACK};
+  bool align_target_locked_{false};
+  int align_direction_{0};
+  double align_target_yaw_{0.0};
+  double hold_goal_x_{0.0};
+  double hold_goal_y_{0.0};
+  double hold_goal_yaw_{0.0};
+  bool hold_goal_valid_{false};
+  double pre_align_done_goal_x_{0.0};
+  double pre_align_done_goal_y_{0.0};
+  double pre_align_done_goal_yaw_{0.0};
+  bool pre_align_done_goal_valid_{false};
+
+  static double normalizeRadian(const double rad);
+  static bool isSameGoal(
+    const double goal_x_1, const double goal_y_1, const double goal_yaw_1, const double goal_x_2,
+    const double goal_y_2, const double goal_yaw_2, const double dist_thr, const double yaw_thr);
+  bool getGoalPose(
+    const trajectory_follower::InputData & input_data, double & goal_x, double & goal_y,
+    double & goal_yaw) const;
+  bool getPreAlignYaw(
+    const trajectory_follower::InputData & input_data, double & pre_align_yaw,
+    bool & is_reverse) const;
+  void resetAlignLock();
+  void lockAlignTarget(const double target_yaw, const double current_yaw);
+  double calcAlignedOmega(const double current_yaw) const;
+  void setZeroLongitudinal(autoware_control_msgs::msg::Longitudinal & longitudinal) const;
+  void applyParkingThreePhaseOverride(
+    const trajectory_follower::InputData & input_data, autoware_control_msgs::msg::Control & out);
 
   static constexpr double logger_throttle_interval = 5000;
 };

@@ -463,22 +463,51 @@ Lateral PurePursuitLateralController::generateOutputControlCmd()
     prev_cmd_ = boost::optional<Lateral>(output_cmd);
     publishDebugMarker();
   } else {
+    // Unlock final-goal stop lock when PP fails this cycle so heading-alignment can recover.
+    goal_stop_lock_active_ = false;
+
+    // Keep minimal target context from trajectory to allow in-place heading alignment fallback.
     debug_data_.has_next_target = false;
     debug_data_.is_reverse_target = false;
     debug_data_.has_goal_pose = false;
+    if (trajectory_resampled_ && !trajectory_resampled_->points.empty()) {
+      const double min_target_dist =
+        std::max(0.0, param_.heading_alignment_min_target_distance);
+      size_t fallback_idx = trajectory_resampled_->points.size() - 1;
+      for (size_t i = 0; i < trajectory_resampled_->points.size(); ++i) {
+        const auto & p = trajectory_resampled_->points.at(i).pose.position;
+        const double d = std::hypot(p.x - current_pose_.position.x, p.y - current_pose_.position.y);
+        if (d >= min_target_dist) {
+          fallback_idx = i;
+          break;
+        }
+      }
+      const auto & fallback_point = trajectory_resampled_->points.at(fallback_idx);
+      debug_data_.next_target = fallback_point.pose.position;
+      debug_data_.has_next_target = true;
+      debug_data_.is_reverse_target = fallback_point.longitudinal_velocity_mps < 0.0;
+
+      const auto & goal_pose = trajectory_resampled_->points.back().pose;
+      debug_data_.has_goal_pose = true;
+      debug_data_.goal_yaw = tf2::getYaw(goal_pose.orientation);
+      debug_data_.goal_distance_m = std::hypot(
+        goal_pose.position.x - current_pose_.position.x,
+        goal_pose.position.y - current_pose_.position.y);
+    } else {
+      debug_data_.goal_distance_m = 0.0;
+    }
     goal_yaw_alignment_active_ = false;
     goal_yaw_alignment_goal_locked_ = false;
     goal_yaw_alignment_direction_ = 0;
     goal_yaw_alignment_done_hold_ = false;
     goal_yaw_alignment_last_w_ = 0.0;
     heading_alignment_active_ = false;
+    heading_alignment_direction_ = 0;
+    heading_alignment_goal_locked_ = false;
+    heading_alignment_goal_yaw_ = 0.0;
     RCLCPP_WARN_THROTTLE(
       logger_, *clock_, 5000, "failed to solve pure_pursuit for control command calculation");
-    if (prev_cmd_) {
-      output_cmd = *prev_cmd_;
-    } else {
-      output_cmd = generateCtrlCmdMsg(0.0, current_odometry_.twist.twist.linear.x);
-    }
+    output_cmd = generateCtrlCmdMsg(0.0, 0.0);
   }
   return output_cmd;
 }
@@ -491,6 +520,35 @@ Lateral PurePursuitLateralController::generateCtrlCmdMsg(
   const double ego_speed = std::abs(current_odometry_.twist.twist.linear.x);
   const bool is_fully_stopped = ego_speed <= std::max(0.0, param_.in_place_rotation_stop_velocity);
   const double current_yaw = tf2::getYaw(current_pose_.orientation);
+  auto same_stamp = [](const builtin_interfaces::msg::Time & a, const builtin_interfaces::msg::Time & b) {
+    return a.sec == b.sec && a.nanosec == b.nanosec;
+  };
+
+  // Hard stop lock after final yaw alignment: keep zero command until a new trajectory arrives.
+  if (goal_stop_lock_active_) {
+    bool unlock_by_goal_change = false;
+    if (trajectory_resampled_ && !trajectory_resampled_->points.empty()) {
+      const auto & goal_pose = trajectory_resampled_->points.back().pose;
+      const double gx = goal_pose.position.x;
+      const double gy = goal_pose.position.y;
+      const double gyaw = tf2::getYaw(goal_pose.orientation);
+      constexpr double goal_change_dist_thr = 0.05;
+      constexpr double goal_change_yaw_thr = 0.02;
+      const double goal_dist_delta = std::hypot(gx - goal_stop_lock_goal_x_, gy - goal_stop_lock_goal_y_);
+      const double goal_yaw_delta =
+        std::abs(autoware_utils::normalize_radian(gyaw - goal_stop_lock_goal_yaw_));
+      unlock_by_goal_change = goal_dist_delta > goal_change_dist_thr || goal_yaw_delta > goal_change_yaw_thr;
+    }
+    if (unlock_by_goal_change || !same_stamp(goal_stop_lock_traj_stamp_, trajectory_resampled_->header.stamp)) {
+      goal_stop_lock_active_ = false;
+      goal_yaw_alignment_done_hold_ = false;
+    } else {
+      Lateral lock_cmd;
+      lock_cmd.stamp = clock_->now();
+      lock_cmd.steering_tire_angle = 0.0F;
+      return lock_cmd;
+    }
+  }
 
   double omega_raw = 0.0;
   bool use_in_place_alignment = false;
@@ -556,12 +614,24 @@ Lateral PurePursuitLateralController::generateCtrlCmdMsg(
       // Keep stop near goal once final yaw is aligned to avoid sign flip jitter around zero error.
       use_in_place_alignment = true;
       omega_raw = 0.0;
+      if (!goal_stop_lock_active_) {
+        goal_stop_lock_active_ = true;
+        goal_stop_lock_traj_stamp_ = trajectory_resampled_->header.stamp;
+        if (trajectory_resampled_ && !trajectory_resampled_->points.empty()) {
+          const auto & goal_pose = trajectory_resampled_->points.back().pose;
+          goal_stop_lock_goal_x_ = goal_pose.position.x;
+          goal_stop_lock_goal_y_ = goal_pose.position.y;
+          goal_stop_lock_goal_yaw_ = tf2::getYaw(goal_pose.orientation);
+        }
+      }
     }
   } else {
     goal_yaw_alignment_active_ = false;
     goal_yaw_alignment_goal_locked_ = false;
     goal_yaw_alignment_direction_ = 0;
-    goal_yaw_alignment_done_hold_ = false;
+    if (!goal_stop_lock_active_) {
+      goal_yaw_alignment_done_hold_ = false;
+    }
     goal_yaw_alignment_last_w_ = 0.0;
   }
 
@@ -579,26 +649,48 @@ Lateral PurePursuitLateralController::generateCtrlCmdMsg(
       if (debug_data_.is_reverse_target) {
         target_yaw = autoware_utils::normalize_radian(target_yaw + M_PI);
       }
-      const double yaw_error = autoware_utils::normalize_radian(target_yaw - current_yaw);
       const double enter_thr = std::max(0.0, param_.heading_alignment_threshold_rad);
       const double exit_thr = std::max(0.0, std::min(param_.heading_alignment_exit_threshold_rad, enter_thr));
+      const double yaw_error_to_target = autoware_utils::normalize_radian(target_yaw - current_yaw);
 
-      if (!heading_alignment_active_ && std::abs(yaw_error) > enter_thr) {
+      // DWA-like start alignment:
+      // 1) lock heading goal when entering alignment
+      // 2) lock direction until exit threshold is met
+      if (!heading_alignment_active_ && std::abs(yaw_error_to_target) > enter_thr) {
         heading_alignment_active_ = true;
-      } else if (heading_alignment_active_ && std::abs(yaw_error) <= exit_thr) {
+        if (!heading_alignment_goal_locked_) {
+          heading_alignment_goal_yaw_ = target_yaw;
+          heading_alignment_goal_locked_ = true;
+        }
+      }
+
+      const double yaw_goal_ref =
+        heading_alignment_goal_locked_ ? heading_alignment_goal_yaw_ : target_yaw;
+      const double yaw_error = autoware_utils::normalize_radian(yaw_goal_ref - current_yaw);
+
+      if (heading_alignment_active_ && std::abs(yaw_error) <= exit_thr) {
         heading_alignment_active_ = false;
+        heading_alignment_direction_ = 0;
+        heading_alignment_goal_locked_ = false;
       }
 
       if (heading_alignment_active_) {
+        if (heading_alignment_direction_ == 0) {
+          heading_alignment_direction_ = (yaw_error >= 0.0) ? 1 : -1;
+        }
         use_in_place_alignment = true;
-        omega_raw = std::copysign(
-          std::max(0.0, param_.in_place_rotation_angular_velocity), yaw_error);
+        omega_raw = static_cast<double>(heading_alignment_direction_) *
+          std::max(0.0, param_.in_place_rotation_angular_velocity);
       }
     } else {
       heading_alignment_active_ = false;
+      heading_alignment_direction_ = 0;
+      heading_alignment_goal_locked_ = false;
     }
-  } else if (!is_fully_stopped) {
+  } else {
     heading_alignment_active_ = false;
+    heading_alignment_direction_ = 0;
+    heading_alignment_goal_locked_ = false;
   }
 
   if (!use_in_place_alignment) {
