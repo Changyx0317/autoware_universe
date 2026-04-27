@@ -1,11 +1,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <future>
 
 #include "autoware_adapi_v1_msgs/msg/route_state.hpp"
 #include "autoware_adapi_v1_msgs/srv/clear_route.hpp"
@@ -14,8 +17,13 @@
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/pose_array.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "rclcpp/parameter_client.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
@@ -26,9 +34,17 @@ using autoware_adapi_v1_msgs::msg::RouteState;
 using autoware_adapi_v1_msgs::srv::ClearRoute;
 using autoware_adapi_v1_msgs::srv::SetRoutePoints;
 using geometry_msgs::msg::PointStamped;
+using geometry_msgs::msg::PoseStamped;
+using nav_msgs::msg::Odometry;
 using namespace std::chrono_literals;
 
 constexpr double kPi = 3.14159265358979323846;
+
+enum class TaskMode
+{
+  Inspection,
+  Bulldoze
+};
 
 struct Vec2
 {
@@ -151,6 +167,22 @@ std::vector<double> makeUniformSamples(
   return samples;
 }
 
+std::string toLowerCopy(const std::string & value)
+{
+  std::string lowered = value;
+  std::transform(
+    lowered.begin(), lowered.end(), lowered.begin(),
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+  return lowered;
+}
+
+double yawFromQuat(const geometry_msgs::msg::Quaternion & q)
+{
+  const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+  const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+  return std::atan2(siny_cosp, cosy_cosp);
+}
+
 const char * routeStateToString(uint16_t state)
 {
   switch (state) {
@@ -260,8 +292,19 @@ public:
     marker_scale_ = declare_parameter<double>("pose_marker_scale", 0.18);
     allow_goal_modification_ = declare_parameter<bool>("allow_goal_modification", false);
     use_clicked_points_ = declare_parameter<bool>("use_clicked_points", true);
-    clicked_point_topic_ =
-      declare_parameter<std::string>("clicked_point_topic", "/clicked_point");
+    inspection_pose_topic_ =
+      declare_parameter<std::string>("inspection_pose_topic", "/inspection/goal_pose");
+    bulldoze_clicked_point_topic_ =
+      declare_parameter<std::string>("bulldoze_clicked_point_topic", "/bulldoze/clicked_point");
+    task_command_topic_ =
+      declare_parameter<std::string>("task_command_topic", "/planning/task_command");
+    odom_topic_ =
+      declare_parameter<std::string>("odom_topic", "/localization/kinematic_state");
+    loop_inspection_goals_ = declare_parameter<bool>("loop_goals", true);
+    inspection_speed_kmh_ = declare_parameter<double>("inspection_speed_kmh", 4.0);
+    bulldoze_speed_kmh_ = declare_parameter<double>("bulldoze_speed_kmh", 2.0);
+    freespace_planner_node_name_ = declare_parameter<std::string>(
+      "freespace_planner_node_name", "/planning/scenario_planning/parking/freespace_planner");
     route_state_topic_ = declare_parameter<std::string>("route_state_topic", "/api/routing/state");
     set_route_service_ =
       declare_parameter<std::string>("set_route_service", "/api/routing/set_route_points");
@@ -283,11 +326,19 @@ public:
     route_state_sub_ = create_subscription<RouteState>(
       route_state_topic_, durable_qos,
       std::bind(&CoveragePlannerNode::onRouteState, this, std::placeholders::_1));
+    odom_sub_ = create_subscription<Odometry>(
+      odom_topic_, 10, std::bind(&CoveragePlannerNode::onOdometry, this, std::placeholders::_1));
+    task_command_sub_ = create_subscription<std_msgs::msg::String>(
+      task_command_topic_, 10,
+      std::bind(&CoveragePlannerNode::onTaskCommand, this, std::placeholders::_1));
 
     if (use_clicked_points_) {
-      clicked_point_sub_ = create_subscription<PointStamped>(
-        clicked_point_topic_, 10,
-        std::bind(&CoveragePlannerNode::onClickedPoint, this, std::placeholders::_1));
+      inspection_pose_sub_ = create_subscription<PoseStamped>(
+        inspection_pose_topic_, 10,
+        std::bind(&CoveragePlannerNode::onInspectionPose, this, std::placeholders::_1));
+      bulldoze_clicked_point_sub_ = create_subscription<PointStamped>(
+        bulldoze_clicked_point_topic_, 10,
+        std::bind(&CoveragePlannerNode::onBulldozeClickedPoint, this, std::placeholders::_1));
     } else {
       configureFromParameters();
       buildCoveragePlan();
@@ -295,6 +346,8 @@ public:
 
     set_route_client_ = create_client<SetRoutePoints>(set_route_service_);
     clear_route_client_ = create_client<ClearRoute>(clear_route_service_);
+    planner_param_client_ =
+      std::make_shared<rclcpp::AsyncParametersClient>(this, freespace_planner_node_name_);
     routing_timer_ = create_wall_timer(500ms, std::bind(&CoveragePlannerNode::processRouting, this));
 
     RCLCPP_INFO(get_logger(), "Coverage planner started.");
@@ -302,12 +355,14 @@ public:
     RCLCPP_INFO(
       get_logger(), "Routing uses %s and %s. /api/routing/route is the route readback topic.",
       set_route_service_.c_str(), route_state_topic_.c_str());
+    RCLCPP_INFO(
+      get_logger(), "task_command_topic=%s odom_topic=%s",
+      task_command_topic_.c_str(), odom_topic_.c_str());
 
     if (use_clicked_points_) {
       RCLCPP_INFO(
-        get_logger(),
-        "Waiting for three clicks on %s to define a rotated rectangle on the map.",
-        clicked_point_topic_.c_str());
+        get_logger(), "Inspection poses from %s, bulldoze rectangle clicks from %s.",
+        inspection_pose_topic_.c_str(), bulldoze_clicked_point_topic_.c_str());
       RCLCPP_INFO(
         get_logger(),
         "Click 1: start corner. Click 2: forward direction and length. Click 3: width and side.");
@@ -316,6 +371,9 @@ public:
         get_logger(), "Using parameter rectangle: origin=(%.2f, %.2f) width=%.2f length=%.2f",
         origin_x_, origin_y_, rect_width_, rect_length_);
     }
+
+    // Default mode is inspection, apply matching planning speed.
+    applyPlannerSpeedByMode();
   }
 
 private:
@@ -328,7 +386,61 @@ private:
     lateral_length_ = rect_length_;
   }
 
-  void onClickedPoint(const PointStamped::ConstSharedPtr msg)
+  void onOdometry(const Odometry::ConstSharedPtr msg)
+  {
+    latest_odom_ = msg;
+    has_odom_ = true;
+  }
+
+  void onInspectionPose(const PoseStamped::ConstSharedPtr msg)
+  {
+    if (!msg->header.frame_id.empty()) {
+      frame_id_ = msg->header.frame_id;
+    }
+
+    inspection_poses_.push_back(Pose2D{msg->pose.position.x, msg->pose.position.y, 0.0});
+    RCLCPP_INFO(
+      get_logger(), "Added inspection point %zu at x=%.2f y=%.2f.",
+      inspection_poses_.size(), msg->pose.position.x, msg->pose.position.y);
+
+    if (inspection_poses_.size() == 1 && current_mode_ == TaskMode::Inspection) {
+      inspection_goal_index_ = 0;
+      resetGoalTracking();
+      replan_requested_ = true;
+    }
+  }
+
+  void onTaskCommand(const std_msgs::msg::String::ConstSharedPtr msg)
+  {
+    const std::string command = toLowerCopy(msg->data);
+    if (
+      command == "bulldoze" || command == "start_bulldoze" || command == "push" ||
+      command == "doze" || command == "推土")
+    {
+      startBulldozeTask();
+      return;
+    }
+    if (command == "inspection" || command == "resume_inspection" || command == "巡检") {
+      returnToNearestInspection("Inspection command received");
+      return;
+    }
+    if (command == "clear_inspection") {
+      clearInspectionGoals();
+      return;
+    }
+    if (command == "clear_bulldoze") {
+      clearBulldozeGoals();
+      return;
+    }
+    if (command == "clear_all") {
+      clearInspectionGoals();
+      clearBulldozeGoals();
+      return;
+    }
+    RCLCPP_WARN(get_logger(), "Unknown task command: %s", msg->data.c_str());
+  }
+
+  void onBulldozeClickedPoint(const PointStamped::ConstSharedPtr msg)
   {
     if (!msg->header.frame_id.empty()) {
       frame_id_ = msg->header.frame_id;
@@ -354,7 +466,9 @@ private:
     try {
       configureFromThreePoints(clicked_points_[0], clicked_points_[1], clicked_points_[2]);
       buildCoveragePlan();
-      scheduleReplan();
+      if (current_mode_ == TaskMode::Bulldoze) {
+        scheduleReplan();
+      }
     } catch (const std::exception & e) {
       has_active_rectangle_ = false;
       poses_.clear();
@@ -424,6 +538,244 @@ private:
       "New rectangle accepted. The node will clear the current route and start from the first goal.");
   }
 
+  Vec2 currentPositionOrDefault() const
+  {
+    if (has_odom_ && latest_odom_) {
+      return makeVec2(latest_odom_->pose.pose.position.x, latest_odom_->pose.pose.position.y);
+    }
+    return makeVec2(0.0, 0.0);
+  }
+
+  size_t findNearestInspectionIndex(const Vec2 & current_position) const
+  {
+    size_t best_index = 0;
+    double best_dist = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < inspection_poses_.size(); ++i) {
+      const auto & p = inspection_poses_.at(i);
+      const double d = std::hypot(current_position.x - p.x, current_position.y - p.y);
+      if (d < best_dist) {
+        best_dist = d;
+        best_index = i;
+      }
+    }
+    return best_index;
+  }
+
+  void startBulldozeTask()
+  {
+    if (!has_active_rectangle_ || poses_.empty()) {
+      RCLCPP_WARN(get_logger(), "Received bulldoze command, but no bulldoze region is available.");
+      return;
+    }
+    if (current_mode_ == TaskMode::Inspection && !inspection_poses_.empty()) {
+      paused_inspection_goal_index_ = std::min(inspection_goal_index_, inspection_poses_.size() - 1);
+      has_paused_inspection_goal_ = true;
+    }
+    current_mode_ = TaskMode::Bulldoze;
+    current_goal_index_ = 0;
+    resetGoalTracking();
+    scheduleReplan();
+    applyPlannerSpeedByMode();
+    RCLCPP_INFO(get_logger(), "Switched to bulldoze mode with %zu goals.", poses_.size());
+  }
+
+  void returnToPausedInspection(const std::string & reason)
+  {
+    current_mode_ = TaskMode::Inspection;
+    if (inspection_poses_.empty()) {
+      resetGoalTracking();
+      coverage_completed_ = true;
+      RCLCPP_WARN(get_logger(), "%s, but no inspection point exists.", reason.c_str());
+      return;
+    }
+
+    if (has_paused_inspection_goal_) {
+      inspection_goal_index_ = std::min(paused_inspection_goal_index_, inspection_poses_.size() - 1);
+    } else {
+      inspection_goal_index_ = std::min(inspection_goal_index_, inspection_poses_.size() - 1);
+    }
+    has_paused_inspection_goal_ = false;
+    resetGoalTracking();
+    scheduleReplan();
+    applyPlannerSpeedByMode();
+    RCLCPP_INFO(
+      get_logger(), "%s. Resume inspection from paused goal %zu/%zu.",
+      reason.c_str(), inspection_goal_index_ + 1, inspection_poses_.size());
+  }
+
+  void returnToNearestInspection(const std::string & reason)
+  {
+    current_mode_ = TaskMode::Inspection;
+    if (inspection_poses_.empty()) {
+      resetGoalTracking();
+      coverage_completed_ = true;
+      RCLCPP_WARN(get_logger(), "%s, but no inspection point exists.", reason.c_str());
+      return;
+    }
+    const size_t nearest = findNearestInspectionIndex(currentPositionOrDefault());
+    inspection_goal_index_ = nearest;
+    resetGoalTracking();
+    scheduleReplan();
+    applyPlannerSpeedByMode();
+    RCLCPP_INFO(
+      get_logger(), "%s. Resume inspection from goal %zu/%zu.",
+      reason.c_str(), inspection_goal_index_ + 1, inspection_poses_.size());
+  }
+
+  void clearInspectionGoals()
+  {
+    inspection_poses_.clear();
+    inspection_goal_index_ = 0;
+    has_paused_inspection_goal_ = false;
+    if (current_mode_ == TaskMode::Inspection) {
+      resetGoalTracking();
+      coverage_completed_ = true;
+    }
+    RCLCPP_INFO(get_logger(), "Cleared all inspection points.");
+  }
+
+  void clearBulldozeGoals()
+  {
+    has_active_rectangle_ = false;
+    poses_.clear();
+    clicked_points_.clear();
+    planner_.reset();
+    current_goal_index_ = 0;
+    if (current_mode_ == TaskMode::Bulldoze) {
+      returnToNearestInspection("Bulldoze goals cleared");
+    }
+    RCLCPP_INFO(get_logger(), "Cleared bulldoze rectangle and generated goals.");
+  }
+
+  const std::vector<Pose2D> * activePoses() const
+  {
+    if (current_mode_ == TaskMode::Bulldoze) {
+      if (!has_active_rectangle_ || poses_.empty()) {
+        return nullptr;
+      }
+      return &poses_;
+    }
+    if (inspection_poses_.empty()) {
+      return nullptr;
+    }
+    return &inspection_poses_;
+  }
+
+  size_t activeGoalIndex() const
+  {
+    return current_mode_ == TaskMode::Bulldoze ? current_goal_index_ : inspection_goal_index_;
+  }
+
+  void setActiveGoalIndex(size_t index)
+  {
+    if (current_mode_ == TaskMode::Bulldoze) {
+      current_goal_index_ = index;
+    } else {
+      inspection_goal_index_ = index;
+    }
+  }
+
+  void incrementActiveGoalIndex()
+  {
+    if (current_mode_ == TaskMode::Bulldoze) {
+      ++current_goal_index_;
+    } else {
+      ++inspection_goal_index_;
+    }
+  }
+
+  double inspectionGoalYaw(size_t goal_index) const
+  {
+    if (inspection_poses_.empty()) return 0.0;
+    if (inspection_poses_.size() == 1U) {
+      if (has_odom_ && latest_odom_) {
+        return yawFromQuat(latest_odom_->pose.pose.orientation);
+      }
+      return 0.0;
+    }
+
+    const size_t current_index = std::min(goal_index, inspection_poses_.size() - 1);
+    size_t reference_index = current_index;
+    if (current_index + 1U < inspection_poses_.size()) {
+      reference_index = current_index + 1U;
+    } else if (loop_inspection_goals_) {
+      reference_index = 0U;
+    } else if (current_index > 0U) {
+      reference_index = current_index - 1U;
+    }
+
+    const auto & current_pose = inspection_poses_[current_index];
+    const auto & reference_pose = inspection_poses_[reference_index];
+    const double dx = reference_pose.x - current_pose.x;
+    const double dy = reference_pose.y - current_pose.y;
+    if (std::hypot(dx, dy) <= 1e-6) {
+      return 0.0;
+    }
+    return std::atan2(dy, dx);
+  }
+
+  Pose2D activeGoalPose() const
+  {
+    const auto * poses_ptr = activePoses();
+    if (!poses_ptr || poses_ptr->empty()) return Pose2D{};
+    const size_t idx = std::min(activeGoalIndex(), poses_ptr->size() - 1);
+    auto goal = poses_ptr->at(idx);
+    if (current_mode_ == TaskMode::Inspection) {
+      goal.yaw = inspectionGoalYaw(idx);
+    }
+    return goal;
+  }
+
+  void resetGoalTracking()
+  {
+    active_goal_sent_ = false;
+    awaiting_route_clear_ = false;
+    advance_goal_after_clear_ = false;
+  }
+
+  void applyPlannerSpeedByMode()
+  {
+    if (!planner_param_client_) {
+      return;
+    }
+    if (!planner_param_client_->service_is_ready()) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Planner parameter service is not ready: %s", freespace_planner_node_name_.c_str());
+      return;
+    }
+
+    const double speed_kmh =
+      current_mode_ == TaskMode::Bulldoze ? bulldoze_speed_kmh_ : inspection_speed_kmh_;
+    pending_speed_set_future_ = planner_param_client_->set_parameters(
+      {rclcpp::Parameter("waypoints_velocity", speed_kmh)});
+    pending_speed_set_mode_ = current_mode_ == TaskMode::Bulldoze ? "Bulldoze" : "Inspection";
+    pending_speed_set_kmh_ = speed_kmh;
+  }
+
+  void processPendingPlannerSpeedUpdate()
+  {
+    if (!pending_speed_set_future_.valid()) {
+      return;
+    }
+    const auto status = pending_speed_set_future_.wait_for(std::chrono::seconds(0));
+    if (status != std::future_status::ready) {
+      return;
+    }
+    const auto results = pending_speed_set_future_.get();
+    if (results.empty() || !results.front().successful) {
+      const std::string reason = results.empty() ? "empty response" : results.front().reason;
+      RCLCPP_WARN(
+        get_logger(),
+        "Failed to set freespace planner speed for %s mode (%.2f km/h): %s",
+        pending_speed_set_mode_.c_str(), pending_speed_set_kmh_, reason.c_str());
+      return;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Set freespace planner waypoints_velocity=%.2f km/h for %s mode.",
+      pending_speed_set_kmh_, pending_speed_set_mode_.c_str());
+  }
+
   void onRouteState(const RouteState::ConstSharedPtr msg)
   {
     has_route_state_ = true;
@@ -437,7 +789,10 @@ private:
 
   void processRouting()
   {
-    if (!has_active_rectangle_ || poses_.empty()) {
+    processPendingPlannerSpeedUpdate();
+
+    const auto * active_poses = activePoses();
+    if (active_poses == nullptr || active_poses->empty()) {
       return;
     }
 
@@ -470,20 +825,30 @@ private:
       active_goal_sent_ = false;
     }
 
-    if (coverage_completed_) {
+    if (coverage_completed_ && current_mode_ == TaskMode::Inspection && !loop_inspection_goals_) {
       return;
     }
 
     if (route_state_ == RouteState::ARRIVED && active_goal_sent_ && !awaiting_route_clear_) {
-      if (current_goal_index_ + 1 >= poses_.size()) {
-        coverage_completed_ = true;
-        active_goal_sent_ = false;
-        advance_goal_after_clear_ = false;
-        awaiting_route_clear_ = false;
-        RCLCPP_INFO(
-          get_logger(),
-          "Reached the final goal (%zu/%zu). Coverage completed, holding position.",
-          current_goal_index_ + 1, poses_.size());
+      const size_t goal_index = std::min(activeGoalIndex(), active_poses->size() - 1);
+      const bool has_next_goal = goal_index + 1 < active_poses->size();
+
+      if (!has_next_goal) {
+        if (current_mode_ == TaskMode::Bulldoze) {
+          RCLCPP_INFO(get_logger(), "Bulldoze goals completed. Returning to paused inspection goal.");
+          returnToPausedInspection("Bulldoze completed");
+        } else if (loop_inspection_goals_) {
+          inspection_goal_index_ = 0;
+          resetGoalTracking();
+          scheduleReplan();
+          RCLCPP_INFO(get_logger(), "Inspection loop completed. Restarting from first goal.");
+        } else {
+          coverage_completed_ = true;
+          active_goal_sent_ = false;
+          advance_goal_after_clear_ = false;
+          awaiting_route_clear_ = false;
+          RCLCPP_INFO(get_logger(), "Final inspection goal reached. Holding position.");
+        }
         return;
       }
       requestClearRoute("Reached current goal. Clearing route before sending the next goal.", true);
@@ -508,7 +873,12 @@ private:
 
   void requestNextGoal()
   {
-    const auto & goal = poses_.at(current_goal_index_);
+    const auto * active_poses = activePoses();
+    if (!active_poses || active_poses->empty()) {
+      return;
+    }
+    const size_t goal_index = std::min(activeGoalIndex(), active_poses->size() - 1);
+    const auto goal = activeGoalPose();
     auto request = std::make_shared<SetRoutePoints::Request>();
     request->header.frame_id = frame_id_;
     request->header.stamp = now();
@@ -516,11 +886,11 @@ private:
     request->option.allow_goal_modification = allow_goal_modification_;
 
     request_in_flight_ = true;
-    const size_t goal_index = current_goal_index_;
 
     RCLCPP_INFO(
-      get_logger(), "Sending goal %zu/%zu: x=%.2f y=%.2f yaw=%.1f deg", goal_index + 1,
-      poses_.size(), goal.x, goal.y, goal.yaw * 180.0 / kPi);
+      get_logger(), "Sending goal [%s] %zu/%zu: x=%.2f y=%.2f yaw=%.1f deg",
+      current_mode_ == TaskMode::Bulldoze ? "Bulldoze" : "Inspection", goal_index + 1,
+      active_poses->size(), goal.x, goal.y, goal.yaw * 180.0 / kPi);
 
     set_route_client_->async_send_request(
       request,
@@ -569,10 +939,11 @@ private:
 
   void advanceGoalIndex()
   {
-    current_goal_index_ = (current_goal_index_ + 1) % poses_.size();
+    incrementActiveGoalIndex();
+    const auto * active_poses = activePoses();
+    const size_t goal_count = active_poses ? active_poses->size() : 0;
     RCLCPP_INFO(
-      get_logger(), "Advancing to next goal. Next index is %zu/%zu.", current_goal_index_ + 1,
-      poses_.size());
+      get_logger(), "Advancing to next goal. Next index is %zu/%zu.", activeGoalIndex() + 1, goal_count);
   }
 
   void publishVisualization()
@@ -582,9 +953,10 @@ private:
     geometry_msgs::msg::PoseArray pose_array;
     pose_array.header.frame_id = frame_id_;
     pose_array.header.stamp = stamp;
-    if (has_active_rectangle_) {
-      pose_array.poses.reserve(poses_.size());
-      for (const auto & pose : poses_) {
+    const auto * active_poses = activePoses();
+    if (active_poses) {
+      pose_array.poses.reserve(active_poses->size());
+      for (const auto & pose : *active_poses) {
         pose_array.poses.push_back(makePose(pose.x, pose.y, pose.yaw));
       }
     }
@@ -595,13 +967,15 @@ private:
       marker_array.markers.push_back(makeRectangleMarker(stamp));
       marker_array.markers.push_back(makePathMarker(stamp));
       marker_array.markers.push_back(makePosePointMarker(stamp));
-      marker_array.markers.push_back(makeCurrentGoalArrowMarker(stamp));
     } else {
+      // Explicitly delete bulldoze markers to avoid RViz stale display after clear_bulldoze.
       marker_array.markers.push_back(makeDeleteMarker(stamp, 0));
       marker_array.markers.push_back(makeDeleteMarker(stamp, 1));
       marker_array.markers.push_back(makeDeleteMarker(stamp, 2));
-      marker_array.markers.push_back(makeDeleteMarker(stamp, 3));
     }
+    marker_array.markers.push_back(makeInspectionPathMarker(stamp));
+    marker_array.markers.push_back(makeInspectionPointMarker(stamp));
+    marker_array.markers.push_back(makeCurrentGoalArrowMarker(stamp));
     marker_array_pub_->publish(marker_array);
   }
 
@@ -700,8 +1074,9 @@ private:
     marker.scale.z = 0.10;
     marker.color = makeColor(0.00f, 0.67f, 0.36f, 0.95f);
 
-    if (!poses_.empty()) {
-      const auto & pose = poses_.at(current_goal_index_);
+    const auto * active_poses = activePoses();
+    if (active_poses && !active_poses->empty()) {
+      const auto pose = activeGoalPose();
       marker.pose = makePose(pose.x, pose.y, pose.yaw);
     } else {
       marker.pose.orientation.w = 1.0;
@@ -709,8 +1084,59 @@ private:
     return marker;
   }
 
+  visualization_msgs::msg::Marker makeInspectionPathMarker(const rclcpp::Time & stamp) const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = frame_id_;
+    marker.header.stamp = stamp;
+    marker.ns = "coverage";
+    marker.id = 4;
+    marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    marker.action = inspection_poses_.empty() ? visualization_msgs::msg::Marker::DELETE : visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.05;
+    marker.color = makeColor(0.95f, 0.65f, 0.10f, 0.95f);
+    if (!inspection_poses_.empty()) {
+      marker.points.reserve(inspection_poses_.size() + (loop_inspection_goals_ ? 1 : 0));
+      for (const auto & p : inspection_poses_) {
+        marker.points.push_back(makePoint(p.x, p.y, 0.03));
+      }
+      if (loop_inspection_goals_ && inspection_poses_.size() > 1) {
+        marker.points.push_back(makePoint(inspection_poses_.front().x, inspection_poses_.front().y, 0.03));
+      }
+    }
+    return marker;
+  }
+
+  visualization_msgs::msg::Marker makeInspectionPointMarker(const rclcpp::Time & stamp) const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = frame_id_;
+    marker.header.stamp = stamp;
+    marker.ns = "coverage";
+    marker.id = 5;
+    marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    marker.action = inspection_poses_.empty() ? visualization_msgs::msg::Marker::DELETE : visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = marker_scale_;
+    marker.scale.y = marker_scale_;
+    marker.scale.z = marker_scale_;
+    marker.color = makeColor(0.95f, 0.65f, 0.10f, 0.95f);
+    if (!inspection_poses_.empty()) {
+      marker.points.reserve(inspection_poses_.size());
+      for (const auto & p : inspection_poses_) {
+        marker.points.push_back(makePoint(p.x, p.y, 0.06));
+      }
+    }
+    return marker;
+  }
+
   std::string frame_id_;
-  std::string clicked_point_topic_;
+  std::string inspection_pose_topic_;
+  std::string bulldoze_clicked_point_topic_;
+  std::string task_command_topic_;
+  std::string odom_topic_;
+  std::string freespace_planner_node_name_;
   std::string route_state_topic_;
   std::string set_route_service_;
   std::string clear_route_service_;
@@ -724,8 +1150,12 @@ private:
   double marker_scale_{0.18};
   bool allow_goal_modification_{false};
   bool use_clicked_points_{true};
+  bool loop_inspection_goals_{true};
+  double inspection_speed_kmh_{4.0};
+  double bulldoze_speed_kmh_{2.0};
 
   bool has_route_state_{false};
+  bool has_odom_{false};
   bool has_active_rectangle_{false};
   bool request_in_flight_{false};
   bool active_goal_sent_{false};
@@ -734,7 +1164,11 @@ private:
   bool replan_requested_{false};
   bool coverage_completed_{false};
   uint16_t route_state_{RouteState::UNKNOWN};
+  TaskMode current_mode_{TaskMode::Inspection};
   size_t current_goal_index_{0};
+  size_t inspection_goal_index_{0};
+  size_t paused_inspection_goal_index_{0};
+  bool has_paused_inspection_goal_{false};
 
   Vec2 rectangle_origin_{0.0, 0.0};
   Vec2 forward_unit_{1.0, 0.0};
@@ -742,16 +1176,25 @@ private:
   double forward_length_{0.0};
   double lateral_length_{0.0};
   std::vector<Vec2> clicked_points_;
+  std::vector<Pose2D> inspection_poses_;
+  Odometry::ConstSharedPtr latest_odom_;
 
   std::unique_ptr<RectBoundaryPlanner> planner_;
   std::vector<Pose2D> poses_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pose_array_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
-  rclcpp::Subscription<PointStamped>::SharedPtr clicked_point_sub_;
+  rclcpp::Subscription<PoseStamped>::SharedPtr inspection_pose_sub_;
+  rclcpp::Subscription<PointStamped>::SharedPtr bulldoze_clicked_point_sub_;
+  rclcpp::Subscription<Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr task_command_sub_;
   rclcpp::Subscription<RouteState>::SharedPtr route_state_sub_;
   rclcpp::Client<SetRoutePoints>::SharedPtr set_route_client_;
   rclcpp::Client<ClearRoute>::SharedPtr clear_route_client_;
+  std::shared_ptr<rclcpp::AsyncParametersClient> planner_param_client_;
+  std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> pending_speed_set_future_;
+  std::string pending_speed_set_mode_{};
+  double pending_speed_set_kmh_{0.0};
   rclcpp::TimerBase::SharedPtr visualization_timer_;
   rclcpp::TimerBase::SharedPtr routing_timer_;
 };

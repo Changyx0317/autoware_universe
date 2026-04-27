@@ -9,3 +9,16 @@ rect_coverage_planner:
     desired_spacing: 1.0
     publish_rate_hz: 1.0
     pose_marker_scale: 0.18
+    inspection_pose_topic: /inspection/goal_pose
+    bulldoze_clicked_point_topic: /bulldoze/clicked_point
+    task_command_topic: /planning/task_command
+    odom_topic: /localization/kinematic_state
+    loop_goals: true
+    inspection_speed_kmh: 4.0 #巡检速度
+    bulldoze_speed_kmh: 2.0 #铲除速度
+    freespace_planner_node_name: /planning/scenario_planning/parking/freespace_planner
+    allow_goal_modification: false
+    use_clicked_points: true
+    route_state_topic: /api/routing/state
+    set_route_service: /api/routing/set_route_points
+    clear_route_service: /api/routing/clear_route

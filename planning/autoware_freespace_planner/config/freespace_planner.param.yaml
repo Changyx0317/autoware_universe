@@ -2,7 +2,7 @@
   ros__parameters:
     # -- Node Configurations --
     planning_algorithm: "astar"  # options: astar, rrtstar
-    waypoints_velocity: 5.0
+    waypoints_velocity: 4.0
     update_rate: 10.0
     th_arrived_distance_m: 0.5
     th_stopped_time_sec: 1.0
@@ -41,6 +41,7 @@
       smoothness_weight: 0.5
       obstacle_distance_weight: 1.75
       goal_lat_distance_weight: 5.0
+
       motion_model: "diff_drive"  # options: bicycle, diff_drive
       enable_direct_three_phase_maneuver: true
       max_curvature: 0.7
