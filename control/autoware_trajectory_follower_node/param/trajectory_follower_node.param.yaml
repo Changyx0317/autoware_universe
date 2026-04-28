@@ -7,8 +7,8 @@
     parking_three_phase.pre_align_enter_yaw_threshold_rad: 0.10
     parking_three_phase.pre_align_exit_yaw_threshold_rad: 0.05
     parking_three_phase.pre_align_min_target_distance_m: 0.30
-    parking_three_phase.post_align_enter_distance_m: 0.35
-    parking_three_phase.post_align_keep_distance_m: 0.55
+    parking_three_phase.post_align_enter_distance_m: 0.15
+    parking_three_phase.post_align_keep_distance_m: 0.25
     parking_three_phase.post_align_enter_yaw_threshold_rad: 0.10
     parking_three_phase.post_align_exit_yaw_threshold_rad: 0.05
     parking_three_phase.align_kp: 1.2

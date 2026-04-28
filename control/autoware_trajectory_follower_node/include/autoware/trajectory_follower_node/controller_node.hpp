@@ -104,6 +104,8 @@ private:
 
   autoware_utils::InterProcessPollingSubscriber<OperationModeState> sub_operation_mode_{
     this, "~/input/current_operation_mode"};
+  autoware_utils::InterProcessPollingSubscriber<geometry_msgs::msg::PoseStamped> sub_goal_pose_{
+    this, "/planning/mission_planning/goal"};
 
   // Publishers
   rclcpp::Publisher<autoware_control_msgs::msg::Control>::SharedPtr control_cmd_pub_;
@@ -117,6 +119,7 @@ private:
   autoware_vehicle_msgs::msg::SteeringReport::ConstSharedPtr current_steering_ptr_;
   geometry_msgs::msg::AccelWithCovarianceStamped::ConstSharedPtr current_accel_ptr_;
   OperationModeState::ConstSharedPtr current_operation_mode_ptr_;
+  geometry_msgs::msg::PoseStamped::ConstSharedPtr current_goal_pose_ptr_;
 
   enum class LateralControllerMode {
     INVALID = 0,

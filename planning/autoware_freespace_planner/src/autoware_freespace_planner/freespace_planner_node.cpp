@@ -542,9 +542,10 @@ void FreespacePlannerNode::planTrajectory()
       if (direct_traj.points.size() < 2) {
         direct_traj.points.push_back(makeTrajectoryPoint(goal_path_yaw, speed_mps, 0.0));
       }
-      // Follow straight_line_planner terminal behavior:
-      // keep a single terminal point with user-requested goal yaw and zero speed.
-      direct_traj.points.back().pose = goal_global;
+      // Keep terminal geometry continuous:
+      // terminal position reaches goal, while orientation keeps path tangent.
+      direct_traj.points.back().pose.position = goal_global.position;
+      direct_traj.points.back().pose.orientation = goal_path_yaw.orientation;
       direct_traj.points.back().longitudinal_velocity_mps = 0.0F;
       direct_traj.points.back().heading_rate_rps = 0.0F;
 
@@ -588,30 +589,14 @@ void FreespacePlannerNode::planTrajectory()
       auto & last = trajectory_.points.back();
       const auto & prev = trajectory_.points.at(trajectory_.points.size() - 2);
 
-      const double dx = goal_pose_.pose.position.x - prev.pose.position.x;
-      const double dy = goal_pose_.pose.position.y - prev.pose.position.y;
-      const double dist_to_goal_from_prev = std::hypot(dx, dy);
-
-      if (dist_to_goal_from_prev > 0.30) {
-        auto approach = last;
-        const double backoff = 0.20;  // [m]
-        const double ratio = std::max(0.0, (dist_to_goal_from_prev - backoff) / dist_to_goal_from_prev);
-        approach.pose.position.x = prev.pose.position.x + ratio * dx;
-        approach.pose.position.y = prev.pose.position.y + ratio * dy;
-        approach.pose.position.z =
-          prev.pose.position.z + ratio * (goal_pose_.pose.position.z - prev.pose.position.z);
-        approach.pose.orientation = prev.pose.orientation;
-        approach.longitudinal_velocity_mps = prev.longitudinal_velocity_mps;
-        approach.heading_rate_rps = 0.0F;
-
-        trajectory_.points.insert(trajectory_.points.end() - 1, approach);
-      }
-
-      last.pose = goal_pose_.pose;
+      // Keep terminal geometry continuous:
+      // terminal position reaches goal, while orientation keeps incoming tangent.
+      last.pose.position = goal_pose_in_costmap_frame.position;
+      last.pose.orientation = prev.pose.orientation;
       last.longitudinal_velocity_mps = 0.0F;
       last.heading_rate_rps = 0.0F;
     } else if (trajectory_.points.size() == 1) {
-      trajectory_.points.front().pose = goal_pose_.pose;
+      trajectory_.points.front().pose.position = goal_pose_in_costmap_frame.position;
       trajectory_.points.front().longitudinal_velocity_mps = 0.0F;
       trajectory_.points.front().heading_rate_rps = 0.0F;
     }

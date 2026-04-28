@@ -191,6 +191,9 @@ bool Controller::processData(rclcpp::Clock & clock)
   is_ready &= getData(current_trajectory_ptr_, sub_ref_path_, "trajectory");
   is_ready &= getData(current_odometry_ptr_, sub_odometry_, "odometry");
   is_ready &= getData(current_operation_mode_ptr_, sub_operation_mode_, "operation mode");
+  if (const auto goal = sub_goal_pose_.take_data()) {
+    current_goal_pose_ptr_ = goal;
+  }
 
   return is_ready;
 }
@@ -355,10 +358,11 @@ bool Controller::getGoalPose(
   const trajectory_follower::InputData & input_data, double & goal_x, double & goal_y,
   double & goal_yaw) const
 {
-  if (input_data.current_trajectory.points.empty()) {
+  (void)input_data;
+  if (!current_goal_pose_ptr_) {
     return false;
   }
-  const auto & goal_pose = input_data.current_trajectory.points.back().pose;
+  const auto & goal_pose = current_goal_pose_ptr_->pose;
   goal_x = goal_pose.position.x;
   goal_y = goal_pose.position.y;
   goal_yaw = tf2::getYaw(goal_pose.orientation);
@@ -513,6 +517,7 @@ void Controller::applyParkingThreePhaseOverride(
   }
 
   if (parking_three_phase_state_ == ParkingThreePhaseState::TRACK) {
+    const auto prev_state = parking_three_phase_state_;
     const bool in_post_align_window =
       has_goal_pose &&
       goal_distance <=
@@ -520,12 +525,19 @@ void Controller::applyParkingThreePhaseOverride(
           0.0, std::max(
                  parking_three_phase_param_.post_align_enter_distance,
                  parking_three_phase_param_.post_align_keep_distance));
+    const bool slow_enough_for_post_align =
+      ego_speed <= std::max(0.2, std::max(0.0, parking_three_phase_param_.stop_velocity_threshold));
+    const bool very_close_to_goal =
+      has_goal_pose &&
+      goal_distance <=
+        std::max(0.05, 0.5 * std::max(0.0, parking_three_phase_param_.post_align_enter_distance));
 
     // Near goal: prioritize final-yaw alignment and do not re-enter pre-align.
     if (
-      is_stopped && in_post_align_window &&
+      in_post_align_window &&
       std::abs(goal_yaw_error) >
-        std::max(0.0, parking_three_phase_param_.post_align_enter_yaw_threshold))
+        std::max(0.0, parking_three_phase_param_.post_align_enter_yaw_threshold) &&
+      (is_stopped || slow_enough_for_post_align || very_close_to_goal))
     {
       parking_three_phase_state_ = ParkingThreePhaseState::POST_ALIGN;
       resetAlignLock();
@@ -538,6 +550,15 @@ void Controller::applyParkingThreePhaseOverride(
       resetAlignLock();
     } else {
       return;
+    }
+    if (parking_three_phase_state_ != prev_state) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "three_phase transition TRACK->%s (dist=%.3f, speed=%.3f, yaw_err=%.3f, in_window=%d, stopped=%d)",
+        (parking_three_phase_state_ == ParkingThreePhaseState::PRE_ALIGN) ? "PRE_ALIGN" :
+        (parking_three_phase_state_ == ParkingThreePhaseState::POST_ALIGN) ? "POST_ALIGN" : "TRACK",
+        goal_distance, ego_speed, std::abs(goal_yaw_error), in_post_align_window ? 1 : 0,
+        is_stopped ? 1 : 0);
     }
   }
 
@@ -567,9 +588,14 @@ void Controller::applyParkingThreePhaseOverride(
     }
 
     setZeroLongitudinal(out.longitudinal);
-    out.lateral.steering_tire_angle = static_cast<float>(calcAlignedOmega(current_yaw));
+    const double omega_cmd = calcAlignedOmega(current_yaw);
+    out.lateral.steering_tire_angle = static_cast<float>(omega_cmd);
     out.lateral.steering_tire_rotation_rate = 0.0F;
     out.lateral.is_defined_steering_tire_rotation_rate = true;
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "three_phase PRE_ALIGN active (dist=%.3f, speed=%.3f, yaw_err=%.3f, omega=%.3f)",
+      goal_distance, ego_speed, std::abs(yaw_error), omega_cmd);
     return;
   }
 
@@ -607,9 +633,14 @@ void Controller::applyParkingThreePhaseOverride(
       hold_goal_valid_ = true;
     } else {
       setZeroLongitudinal(out.longitudinal);
-      out.lateral.steering_tire_angle = static_cast<float>(calcAlignedOmega(current_yaw));
+      const double omega_cmd = calcAlignedOmega(current_yaw);
+      out.lateral.steering_tire_angle = static_cast<float>(omega_cmd);
       out.lateral.steering_tire_rotation_rate = 0.0F;
       out.lateral.is_defined_steering_tire_rotation_rate = true;
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "three_phase POST_ALIGN active (dist=%.3f, speed=%.3f, yaw_err=%.3f, omega=%.3f)",
+        goal_distance, ego_speed, std::abs(yaw_error), omega_cmd);
       return;
     }
   }
